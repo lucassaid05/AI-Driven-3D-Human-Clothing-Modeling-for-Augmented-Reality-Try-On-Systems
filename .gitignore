@@ -1,0 +1,17 @@
+node_modules/
+dist/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.DS_Store
+Thumbs.db
+*.log
+.vite/
+
+# Local pipeline / model outputs (large binaries; remove this line if you need them in git)
+generated/

@@ -1,0 +1,335 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Pipeline dashboard — Pix2Surf</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --card: #12121a;
+      --border: rgba(255,255,255,0.08);
+      --cyan: #00f5d4;
+      --magenta: #f72585;
+      --muted: #8b8b9e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, sans-serif;
+      background: var(--bg);
+      color: #eee;
+      margin: 0;
+      padding: 1.25rem;
+      line-height: 1.5;
+    }
+    h1 { font-size: 1.25rem; margin: 0 0 0.25rem; }
+    .sub { color: var(--muted); font-size: 0.85rem; margin-bottom: 1.25rem; }
+    nav { margin-bottom: 1.5rem; }
+    nav a { color: var(--cyan); margin-right: 1rem; }
+    .grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    }
+    section {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 1rem 1.1rem;
+    }
+    section h2 {
+      font-size: 0.75rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+      margin: 0 0 0.75rem;
+    }
+    .pill {
+      display: inline-block;
+      padding: 0.2rem 0.5rem;
+      border-radius: 999px;
+      font-size: 0.7rem;
+      font-weight: 600;
+      text-transform: uppercase;
+    }
+    .pill.ok { background: rgba(0,245,212,0.15); color: var(--cyan); }
+    .pill.bad { background: rgba(247,37,133,0.15); color: var(--magenta); }
+    pre {
+      font-size: 0.72rem;
+      overflow: auto;
+      max-height: 200px;
+      background: #0d0d12;
+      padding: 0.6rem;
+      border-radius: 6px;
+      margin: 0.5rem 0 0;
+    }
+    .ux-btns { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.5rem; }
+    .ux-btns button {
+      padding: 0.5rem 0.85rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #1a1a22;
+      color: #fff;
+      cursor: pointer;
+    }
+    .ux-btns button:hover { border-color: var(--cyan); color: var(--cyan); }
+    #ux-note { font-size: 0.8rem; color: var(--muted); margin-top: 0.5rem; }
+    .stages-wrap { display: flex; flex-direction: column; gap: 0.75rem; margin-top: 0.35rem; }
+    .stage-card {
+      background: #0d0d12;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      padding: 0.65rem 0.75rem;
+    }
+    .stage-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      gap: 0.35rem 0.65rem;
+      margin-bottom: 0.35rem;
+    }
+    .stage-head strong { font-size: 0.88rem; }
+    .stage-order { color: var(--muted); font-size: 0.72rem; }
+    .impl {
+      font-size: 0.65rem;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      padding: 0.15rem 0.45rem;
+      border-radius: 4px;
+    }
+    .impl.live { background: rgba(0,245,212,0.2); color: var(--cyan); }
+    .impl.partial { background: rgba(255,193,7,0.15); color: #ffc107; }
+    .impl.planned { background: rgba(139,139,158,0.2); color: var(--muted); }
+    .stage-summary { font-size: 0.78rem; color: #c8c8d4; margin: 0 0 0.4rem; line-height: 1.45; }
+    ul.tasks-mini { margin: 0.25rem 0 0; padding-left: 1rem; font-size: 0.72rem; color: var(--muted); }
+    .stage-links { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.45rem; }
+    .stage-links a {
+      font-size: 0.72rem;
+      color: var(--cyan);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      padding: 0.2rem 0.45rem;
+      border-radius: 6px;
+    }
+    .stage-links a:hover { border-color: var(--cyan); }
+    .api-routes { font-size: 0.72rem; color: var(--muted); margin: 0.5rem 0 0; }
+    .api-routes code { color: #c8c8d4; }
+    #toggle-pipeline-json {
+      margin-top: 0.5rem;
+      font-size: 0.72rem;
+      background: transparent;
+      border: none;
+      color: var(--cyan);
+      cursor: pointer;
+      padding: 0;
+    }
+    #pipeline-raw { display: none; margin-top: 0.5rem; }
+    #pipeline-raw.open { display: block; }
+  </style>
+</head>
+<body>
+  <h1>Pipeline dashboard</h1>
+  <p class="sub">Roadmap tooling: backend probe, deployment notes, UX preference scratchpad (local only).</p>
+  <nav>
+    <a href="../index.html">Home</a>
+    <a href="../legacy/ar-tryon-v13.html">AR try-on</a>
+    <a href="splat-viewer.html">3DGS viewer</a>
+    <a href="hunyuan-studio.html">Hunyuan 3D</a>
+    <a href="../docs/TUNNELS.md">TUNNELS.md</a>
+    <a href="../docs/ROADMAP.md">ROADMAP.md</a>
+    <a href="../pipeline/ARCHITECTURE.md">Architecture</a>
+    <a href="../eval/HUMAN_SPLAT_vs_GLB.md">HumanSplat vs GLB</a>
+    <a href="../docs/HUNYUAN_EVAL.md">Hunyuan eval</a>
+  </nav>
+
+  <div class="grid">
+    <section>
+      <h2>Backend</h2>
+      <div id="health-row">Checking <code>/api/health</code>…</div>
+      <div id="config-row" style="margin-top:0.5rem"></div>
+      <div id="mobile-row" style="margin-top:0.65rem;font-size:0.85rem;color:var(--muted)"></div>
+      <pre id="garments-preview" style="display:none"></pre>
+    </section>
+
+    <section id="pipeline-section">
+      <h2>Pipeline stages</h2>
+      <p class="stage-summary" style="margin-top:0">Loaded from <code>GET /api/pipeline</code> — links open in this origin.</p>
+      <div id="pipeline-stages" class="stages-wrap">Loading stages…</div>
+      <div id="pipeline-extras" class="stage-summary" style="margin-top:0.5rem"></div>
+      <p class="api-routes" id="pipeline-live-routes"></p>
+      <button type="button" id="toggle-pipeline-json">Show raw JSON</button>
+      <pre id="pipeline-raw"></pre>
+    </section>
+
+    <section>
+      <h2>UX study (localStorage)</h2>
+      <p style="font-size:0.88rem;margin:0">For dissertation: do participants prefer <strong>live camera</strong> or <strong>uploaded photo</strong>?</p>
+      <div class="ux-btns">
+        <button type="button" id="ux-camera">I prefer live camera</button>
+        <button type="button" id="ux-upload">I prefer photo upload</button>
+        <button type="button" id="ux-clear">Clear</button>
+      </div>
+      <p id="ux-note"></p>
+    </section>
+  </div>
+
+  <script type="module">
+    import { fetchConfig, fetchGarments, fetchHealth, fetchPipeline, fetchServerInfo } from './pipeline-api.js';
+
+    const origin = location.origin;
+
+    async function refresh() {
+      const hr = document.getElementById('health-row');
+      const cr = document.getElementById('config-row');
+      const gp = document.getElementById('garments-preview');
+      const mr = document.getElementById('mobile-row');
+
+      try {
+        const h = await fetchHealth();
+        hr.innerHTML = `<span class="pill ok">OK</span> API at <code>${origin}</code>`;
+      } catch {
+        hr.innerHTML = `<span class="pill bad">Down</span> Start <code>python server-local.py</code> in <code>test/</code>`;
+      }
+
+      try {
+        const cfg = await fetchConfig();
+        const ready = cfg.ready === true;
+        cr.innerHTML = ready
+          ? `<span class="pill ok">Generation ready</span>`
+          : `<span class="pill bad">Not ready</span> — check <code>.env</code> paths`;
+      } catch {
+        cr.innerHTML = `<span class="pill bad">No config</span>`;
+      }
+
+      try {
+        const { garments } = await fetchGarments();
+        gp.style.display = 'block';
+        gp.textContent = JSON.stringify({ count: garments?.length ?? 0, sample: garments?.slice(0, 3) }, null, 2);
+      } catch {
+        gp.style.display = 'none';
+      }
+
+      const stagesEl = document.getElementById('pipeline-stages');
+      const rawEl = document.getElementById('pipeline-raw');
+      const routesEl = document.getElementById('pipeline-live-routes');
+      try {
+        const pipe = await fetchPipeline();
+        console.log('[pipeline]', pipe);
+        rawEl.textContent = JSON.stringify(pipe, null, 2);
+
+        const stages = Array.isArray(pipe.stages) ? [...pipe.stages] : [];
+        stages.sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+
+        if (pipe.live_route && routesEl) {
+          const bits = Object.entries(pipe.live_route).map(([k, v]) => `<code>${v}</code>`);
+          routesEl.innerHTML = `<strong style="color:#eee">Live API:</strong> ${bits.join(' · ')}`;
+        }
+
+        const implClass = (s) => {
+          const i = (s.implementation || 'planned').toLowerCase();
+          if (i === 'live') return 'live';
+          if (i === 'partial') return 'partial';
+          return 'planned';
+        };
+
+        stagesEl.innerHTML = stages
+          .map((s) => {
+            const tasks = Array.isArray(s.tasks) ? s.tasks : [];
+            const links = Array.isArray(s.app_links) ? s.app_links : [];
+            const cli = Array.isArray(s.cli_scripts) ? s.cli_scripts : [];
+            const ref = s.reference
+              ? `<div class="stage-links"><a href="${s.reference}" target="_blank" rel="noopener">Reference</a></div>`
+              : '';
+            return `
+            <div class="stage-card" data-stage="${s.id || ''}">
+              <div class="stage-head">
+                <span class="stage-order">Stage ${s.order ?? '?'}</span>
+                <strong>${s.title || s.id}</strong>
+                <span class="impl ${implClass(s)}">${s.implementation || 'planned'}</span>
+              </div>
+              ${s.summary ? `<p class="stage-summary">${s.summary}</p>` : ''}
+              ${
+                tasks.length
+                  ? `<ul class="tasks-mini">${tasks.map((t) => `<li>${t}</li>`).join('')}</ul>`
+                  : ''
+              }
+              ${
+                links.length
+                  ? `<div class="stage-links">${links
+                      .map((l) => `<a href="${l.path}">${l.label}</a>`)
+                      .join('')}</div>`
+                  : ''
+              }
+              ${
+                cli.length
+                  ? `<p class="stage-summary" style="margin-top:0.5rem;margin-bottom:0"><code style="font-size:0.68rem">${cli.map((c) => c.path).join(', ')}</code></p>`
+                  : ''
+              }
+              ${ref}
+            </div>`;
+          })
+          .join('');
+
+        const extrasEl = document.getElementById('pipeline-extras');
+        if (extrasEl) {
+          const rs = pipe.related_sota && typeof pipe.related_sota === 'object'
+            ? Object.entries(pipe.related_sota)
+                .map(([k, u]) => `<a href="${u}" target="_blank" rel="noopener">${k}</a>`)
+                .join(' · ')
+            : '';
+          const docs = pipe.docs && typeof pipe.docs === 'object'
+            ? Object.entries(pipe.docs)
+                .map(([k, f]) => `<a href="${f}">${f}</a>`)
+                .join(' · ')
+            : '';
+          extrasEl.innerHTML =
+            rs || docs
+              ? `<p style="margin:0"><strong style="color:#eee">Related (API):</strong> ${rs || '—'}</p><p style="margin:0.35rem 0 0"><strong style="color:#eee">Docs (API):</strong> ${docs || '—'}</p>`
+              : '';
+        }
+      } catch (e) {
+        stagesEl.innerHTML = `<span class="pill bad">Could not load</span> <span style="font-size:0.8rem;color:var(--muted)">${String(e.message || e)}</span>`;
+        const extrasEl = document.getElementById('pipeline-extras');
+        if (extrasEl) extrasEl.innerHTML = '';
+      }
+
+      document.getElementById('toggle-pipeline-json')?.addEventListener('click', () => {
+        rawEl.classList.toggle('open');
+      });
+
+      try {
+        const si = await fetchServerInfo();
+        const u = si.urls?.lan_tryon;
+        mr.innerHTML = u
+          ? `<strong style="color:#eee">Phone (same Wi‑Fi):</strong> <a href="${u}" style="color:var(--cyan)">${u}</a><br><span style="font-size:0.78rem">${String(si.camera_hint || '')}</span>`
+          : `<span>LAN IP not detected — open <code>/api/server-info</code> on the PC.</span>`;
+      } catch {
+        mr.textContent = '';
+      }
+    }
+
+    void refresh();
+
+    const KEY = 'pix2surf_ux_preference_v1';
+    const note = document.getElementById('ux-note');
+    function readUx() {
+      const v = localStorage.getItem(KEY);
+      note.textContent = v ? `Stored: ${v} (browser only; export manually for study data).` : 'No preference stored yet.';
+    }
+    readUx();
+    document.getElementById('ux-camera').addEventListener('click', () => {
+      localStorage.setItem(KEY, 'live_camera');
+      readUx();
+    });
+    document.getElementById('ux-upload').addEventListener('click', () => {
+      localStorage.setItem(KEY, 'photo_upload');
+      readUx();
+    });
+    document.getElementById('ux-clear').addEventListener('click', () => {
+      localStorage.removeItem(KEY);
+      readUx();
+    });
+  </script>
+</body>
+</html>

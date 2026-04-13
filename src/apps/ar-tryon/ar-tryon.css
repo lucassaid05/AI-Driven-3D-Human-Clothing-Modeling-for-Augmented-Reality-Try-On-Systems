@@ -1,0 +1,368 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;500;600;700;800&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/**
+ * Try-on UI: Tailwind-powered build with component layer preserving v13 layout and tokens.
+ * Prefer editing theme in tailwind.config.js for colours / fonts.
+ */
+@layer base {
+  :root {
+    --bg-primary: theme('colors.tryon.bg');
+    --bg-secondary: theme('colors.tryon.panel');
+    --accent-cyan: theme('colors.tryon.cyan');
+    --accent-magenta: theme('colors.tryon.magenta');
+    --accent-yellow: theme('colors.tryon.yellow');
+    --text-primary: #ffffff;
+    --text-secondary: theme('colors.tryon.muted');
+    --glass: rgba(255, 255, 255, 0.03);
+    --glass-border: rgba(255, 255, 255, 0.08);
+  }
+
+  * {
+    @apply m-0 box-border p-0;
+  }
+
+  body {
+    @apply min-h-screen overflow-hidden bg-tryon-bg font-mono text-white;
+  }
+}
+
+@layer components {
+  .bg-gradient {
+    @apply pointer-events-none fixed inset-0 z-0;
+    background:
+      radial-gradient(ellipse 80% 50% at 20% 40%, rgba(0, 245, 212, 0.08) 0%, transparent 50%),
+      radial-gradient(ellipse 60% 40% at 80% 60%, rgba(247, 37, 133, 0.06) 0%, transparent 50%);
+  }
+
+  .app-container {
+    @apply relative z-[2] grid h-screen;
+    grid-template-columns: 1fr 340px;
+    grid-template-rows: auto 1fr auto;
+  }
+
+  .app-container > header {
+    @apply col-span-full flex items-center justify-between border-b border-white/[0.08] bg-white/[0.03] px-8 py-4 backdrop-blur-xl;
+  }
+
+  .logo {
+    @apply bg-gradient-to-br from-tryon-cyan to-tryon-magenta bg-clip-text font-display text-2xl font-extrabold text-transparent;
+  }
+
+  .header-nav {
+    @apply flex items-center gap-3 text-[0.7rem] uppercase tracking-[0.06em];
+  }
+
+  .header-nav a {
+    @apply text-tryon-cyan no-underline;
+  }
+
+  .status-indicator {
+    @apply flex items-center gap-3 text-[0.75rem] uppercase tracking-[0.1em] text-tryon-muted;
+  }
+
+  .status-dot {
+    @apply h-2 w-2 rounded-full bg-tryon-muted transition-all duration-300 ease-out;
+  }
+
+  .status-dot.active {
+    @apply animate-status-pulse bg-tryon-cyan shadow-glow;
+  }
+
+  .status-dot.warning {
+    @apply bg-tryon-yellow shadow-[0_0_12px_rgba(254,228,64,0.6)];
+  }
+
+  .status-dot.error {
+    @apply bg-tryon-magenta shadow-[0_0_12px_rgba(247,37,133,0.6)];
+  }
+
+  .viewport-container {
+    @apply relative overflow-hidden border-r border-white/[0.08] bg-tryon-panel;
+  }
+
+  #webcam-video {
+    @apply absolute h-full w-full object-cover;
+  }
+
+  #three-canvas,
+  #debug-canvas {
+    @apply pointer-events-none absolute h-full w-full;
+  }
+
+  #debug-canvas {
+    @apply opacity-70;
+  }
+
+  .viewport-overlay {
+    @apply pointer-events-none absolute inset-0;
+  }
+
+  .corner-frame {
+    @apply absolute h-10 w-10 border-2 border-tryon-cyan opacity-40;
+  }
+
+  .corner-frame.tl {
+    @apply left-5 top-5 border-b-0 border-r-0;
+  }
+  .corner-frame.tr {
+    @apply right-5 top-5 border-b-0 border-l-0;
+  }
+  .corner-frame.bl {
+    @apply bottom-5 left-5 border-r-0 border-t-0;
+  }
+  .corner-frame.br {
+    @apply bottom-5 right-5 border-l-0 border-t-0;
+  }
+
+  .tracking-info {
+    @apply absolute bottom-6 left-6 rounded-lg border border-white/[0.08] bg-black/70 px-4 py-3 text-[0.7rem] backdrop-blur-md;
+  }
+
+  .tracking-info .label {
+    @apply mb-1 text-tryon-muted;
+  }
+
+  .tracking-info .value {
+    @apply font-bold text-tryon-cyan;
+  }
+
+  .side-panel {
+    @apply flex flex-col gap-5 overflow-y-auto bg-white/[0.03] p-5 backdrop-blur-xl;
+  }
+
+  .panel-section {
+    @apply rounded-xl border border-white/[0.08] bg-tryon-panel p-4;
+  }
+
+  .panel-section h3 {
+    @apply mb-3 border-b border-white/[0.08] pb-2 font-display text-[0.8rem] font-semibold uppercase tracking-[0.1em] text-tryon-muted;
+  }
+
+  .file-upload-zone {
+    @apply cursor-pointer rounded-lg border-2 border-dashed border-white/[0.08] px-4 py-6 text-center transition-all duration-300 ease-out;
+  }
+
+  .file-upload-zone:hover {
+    @apply border-tryon-cyan bg-tryon-cyan/[0.03];
+  }
+
+  .file-upload-zone.dragging {
+    @apply border-tryon-magenta bg-tryon-magenta/[0.05];
+  }
+
+  .upload-icon {
+    @apply mx-auto mb-3 h-10 w-10 stroke-tryon-muted;
+  }
+
+  .file-upload-zone p {
+    @apply text-[0.7rem] leading-relaxed text-tryon-muted;
+  }
+
+  .file-upload-zone .highlight {
+    @apply text-tryon-cyan;
+  }
+
+  input[type='file'] {
+    @apply hidden;
+  }
+
+  .slider-group {
+    @apply mb-2 flex flex-col gap-3;
+  }
+
+  .slider-row {
+    @apply flex items-center justify-between gap-3;
+  }
+
+  .slider-row label {
+    @apply min-w-[80px] text-[0.7rem] text-tryon-muted;
+  }
+
+  .slider-row input[type='range'] {
+    @apply h-1 flex-1 appearance-none rounded-sm border-0 bg-white/[0.08] outline-none;
+  }
+
+  .slider-row input[type='range']::-webkit-slider-thumb {
+    @apply h-4 w-4 cursor-pointer appearance-none rounded-full bg-tryon-cyan shadow-[0_0_8px_rgba(0,245,212,0.6)];
+  }
+
+  .slider-row span {
+    @apply min-w-[50px] text-right text-[0.7rem] font-bold text-tryon-cyan;
+  }
+
+  .toggle-btn {
+    @apply relative h-6 w-11 cursor-pointer rounded-xl bg-white/[0.08] transition-colors duration-300 ease-out;
+  }
+
+  .toggle-btn::after {
+    @apply absolute left-0.5 top-0.5 h-5 w-5 rounded-full bg-tryon-muted transition-all duration-300 ease-out content-[''];
+  }
+
+  .toggle-btn.active {
+    @apply bg-tryon-cyan;
+  }
+
+  .toggle-btn.active::after {
+    @apply left-[22px] bg-white;
+  }
+
+  .toggle-row {
+    @apply flex items-center justify-between py-2;
+  }
+
+  .toggle-row label {
+    @apply text-[0.7rem] text-tryon-muted;
+  }
+
+  .action-btn {
+    @apply w-full cursor-pointer rounded-lg border-0 py-3.5 font-mono text-[0.75rem] font-bold uppercase tracking-[0.1em] transition-all duration-300 ease-out;
+  }
+
+  .action-btn.primary {
+    @apply bg-gradient-to-br from-tryon-cyan to-tryon-magenta text-white;
+  }
+
+  .action-btn.primary:hover {
+    @apply -translate-y-0.5 shadow-[0_8px_20px_rgba(0,245,212,0.3)];
+  }
+
+  .action-btn.secondary {
+    @apply border border-white/[0.08] bg-white/[0.03] text-white;
+  }
+
+  .action-btn:disabled {
+    @apply cursor-not-allowed opacity-40;
+  }
+
+  .mini-btn {
+    @apply cursor-pointer rounded-md border border-white/[0.08] bg-white/[0.03] px-3 py-1.5 text-[0.65rem] text-tryon-muted;
+  }
+
+  .mini-btn:hover {
+    @apply bg-tryon-panel text-tryon-cyan;
+  }
+
+  .mini-btn.danger {
+    @apply border-tryon-magenta text-tryon-magenta;
+  }
+
+  .stats-grid {
+    @apply grid grid-cols-2 gap-4;
+  }
+
+  .stat-item {
+    @apply text-center;
+  }
+
+  .stat-value {
+    @apply font-display text-2xl font-bold text-tryon-cyan;
+  }
+
+  .stat-label {
+    @apply mt-1 text-[0.65rem] uppercase tracking-[0.1em] text-tryon-muted;
+  }
+
+  .debug-row {
+    @apply mt-2 flex gap-2;
+  }
+
+  .debug-row .mini-btn {
+    @apply flex-1;
+  }
+
+  .app-container > footer {
+    @apply col-span-full flex items-center justify-between border-t border-white/[0.08] bg-white/[0.03] px-8 py-4 text-[0.7rem] text-tryon-muted backdrop-blur-xl;
+  }
+
+  .footer-links a {
+    @apply ml-6 text-tryon-cyan no-underline;
+  }
+
+  .loading-overlay {
+    @apply pointer-events-none fixed inset-0 z-[1000] flex flex-col items-center justify-center bg-[rgba(10,10,15,0.95)] opacity-0 backdrop-blur-md transition-opacity duration-300 ease-out;
+  }
+
+  .loading-overlay.active {
+    @apply pointer-events-auto opacity-100;
+  }
+
+  .spinner {
+    @apply h-[60px] w-[60px] animate-spin rounded-full border-4 border-white/[0.08] border-t-tryon-cyan;
+  }
+
+  .loading-text {
+    @apply mt-6 text-sm text-tryon-muted;
+  }
+
+  .toast-container {
+    @apply fixed bottom-8 right-8 z-[1001] flex flex-col gap-2;
+  }
+
+  .toast {
+    @apply rounded-lg border border-white/[0.08] bg-tryon-panel px-5 py-3.5 text-[0.75rem] shadow-[0_8px_24px_rgba(0,0,0,0.3)];
+  }
+
+  .toast.success {
+    @apply border-tryon-cyan text-tryon-cyan;
+  }
+
+  .toast.warning {
+    @apply border-tryon-yellow text-tryon-yellow;
+  }
+
+  .toast.error {
+    @apply border-tryon-magenta text-tryon-magenta;
+  }
+
+  .info-box {
+    @apply mt-2 rounded-md border border-tryon-cyan bg-tryon-cyan/10 p-2 text-[0.6rem] leading-snug text-tryon-cyan;
+  }
+
+  .gen-image-row {
+    @apply mb-3 grid grid-cols-2 gap-2;
+  }
+
+  .gen-image-slot label {
+    @apply mb-1 block text-[0.65rem] uppercase tracking-[0.08em] text-tryon-muted;
+  }
+
+  .gen-image-slot .slot-btn {
+    @apply flex aspect-square w-full cursor-pointer items-center justify-center overflow-hidden rounded-md border-2 border-dashed border-white/[0.08] bg-tryon-bg text-[0.6rem] text-tryon-muted transition-colors duration-200;
+  }
+
+  .gen-image-slot .slot-btn:hover {
+    @apply border-tryon-cyan;
+  }
+
+  .gen-image-slot .slot-btn img {
+    @apply h-full w-full rounded object-cover;
+  }
+
+  .gen-status {
+    @apply mt-1.5 min-h-4 text-center text-[0.65rem] text-tryon-muted;
+  }
+
+  .gen-status.busy {
+    @apply text-tryon-yellow;
+  }
+
+  .gen-status.ok {
+    @apply text-tryon-cyan;
+  }
+
+  .gen-status.fail {
+    @apply text-tryon-magenta;
+  }
+
+  .tryon-select {
+    @apply flex-1 rounded border border-white/[0.08] bg-[#1a1a25] px-1.5 py-1 text-[9px] text-white;
+  }
+
+  .tryon-input-sm {
+    @apply flex-1 rounded border border-white/[0.08] bg-[#1a1a25] px-1.5 py-1 text-[10px] text-white;
+  }
+}

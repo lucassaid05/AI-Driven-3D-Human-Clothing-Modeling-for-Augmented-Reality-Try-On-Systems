@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <title>Pix2Surf — Web</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --card: #12121a;
+      --border: rgba(255,255,255,0.1);
+      --cyan: #00f5d4;
+      --muted: #8b8b9e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: #fff;
+      margin: 0;
+      padding: max(1rem, env(safe-area-inset-top)) 1rem 1.5rem;
+      min-height: 100dvh;
+    }
+    h1 { font-size: 1.35rem; margin: 0 0 0.35rem; }
+    p.lead { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.95rem; }
+    ul.links {
+      list-style: none;
+      padding: 0;
+      margin: 0;
+      display: flex;
+      flex-direction: column;
+      gap: 0.65rem;
+    }
+    ul.links a {
+      display: block;
+      padding: 1rem 1.1rem;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      color: var(--cyan);
+      text-decoration: none;
+      font-weight: 600;
+      font-size: 1.05rem;
+      -webkit-tap-highlight-color: transparent;
+    }
+    ul.links a:active { opacity: 0.85; }
+    ul.links span { display: block; font-size: 0.75rem; font-weight: 400; color: var(--muted); margin-top: 0.25rem; }
+    #lan-box {
+      margin-top: 1.5rem;
+      padding: 0.9rem;
+      background: #15151f;
+      border-radius: 10px;
+      border: 1px solid var(--border);
+      font-size: 0.8rem;
+      color: var(--muted);
+      word-break: break-all;
+    }
+    #lan-box strong { color: #fff; display: block; margin-bottom: 0.35rem; }
+    #lan-box a { color: var(--cyan); }
+  </style>
+</head>
+<body>
+  <h1>Pix2Surf</h1>
+  <p class="lead">Open these pages in your phone’s browser (same Wi‑Fi as this PC). Camera may require HTTPS — see <a href="docs/TUNNELS.md" style="color:var(--cyan)">TUNNELS.md</a>. <a href="pages/research-notice.html" style="color:var(--cyan)">Research notice</a> · <a href="pages/research-questionnaire.html" style="color:var(--cyan)">Post-task questionnaire</a> (consented participants).</p>
+  <ul class="links">
+    <li><a href="apps/ar-tryon/">AR try-on <span>TypeScript + Tailwind (run <code>npm run dev</code> in <code>test/</code>)</span></a> · <a href="legacy/ar-tryon-v13.html">static v13</a></li>
+    <li><a href="pages/pipeline-dashboard.html">Pipeline dashboard <span>All roadmap stages, API health, LAN links</span></a></li>
+    <li><a href="pages/splat-viewer.html">3DGS viewer <span>Gaussian splat / PLY preview</span></a></li>
+    <li><a href="pages/hunyuan-studio.html">Hunyuan 3D <span>Tencent text/image → 3D; two-photo GLB → AR try-on</span></a></li>
+  </ul>
+  <div id="lan-box" hidden>
+    <strong>On this network</strong>
+    <span id="lan-lines"></span>
+  </div>
+  <script type="module">
+    try {
+      const r = await fetch('/api/server-info');
+      if (!r.ok) throw new Error(String(r.status));
+      const j = await r.json();
+      const box = document.getElementById('lan-box');
+      const lines = document.getElementById('lan-lines');
+      if (j.lan_ipv4 && j.urls?.lan_home) {
+        lines.innerHTML = `<a href="${j.urls.lan_tryon}">${j.urls.lan_tryon}</a>`;
+        box.hidden = false;
+      }
+    } catch { /* offline / file:// */ }
+  </script>
+</body>
+</html>

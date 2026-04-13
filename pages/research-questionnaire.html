@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Post-task questionnaire — AR try-on research</title>
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --card: #12121a;
+      --border: rgba(255,255,255,0.1);
+      --cyan: #00f5d4;
+      --muted: #8b8b9e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      font-family: system-ui, -apple-system, sans-serif;
+      background: var(--bg);
+      color: #e8e8ef;
+      margin: 0;
+      padding: max(1rem, env(safe-area-inset-top)) 1rem max(2rem, env(safe-area-inset-bottom));
+      min-height: 100dvh;
+      line-height: 1.5;
+      font-size: 0.95rem;
+    }
+    .wrap { max-width: 36rem; margin: 0 auto; }
+    h1 { font-size: 1.25rem; margin: 0 0 0.5rem; color: #fff; }
+    .lead { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.88rem; }
+    a { color: var(--cyan); }
+    fieldset {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      margin: 0 0 1rem;
+      padding: 0.85rem 1rem 1rem;
+      background: var(--card);
+    }
+    legend {
+      padding: 0 0.35rem;
+      color: var(--cyan);
+      font-weight: 600;
+      font-size: 0.9rem;
+    }
+    label.block { display: block; margin: 0.65rem 0 0.35rem; font-size: 0.82rem; color: #ccc; }
+    input[type="text"] {
+      width: 100%;
+      padding: 0.5rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #1a1a25;
+      color: #fff;
+      font-size: 0.9rem;
+    }
+    .scale {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      align-items: center;
+    }
+    .scale label.choice {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.25rem;
+      margin: 0;
+      padding: 0.25rem 0.4rem;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      border: 1px solid transparent;
+    }
+    .scale label.choice.picked {
+      border-color: var(--cyan);
+      background: rgba(0, 245, 212, 0.08);
+    }
+    textarea {
+      width: 100%;
+      min-height: 5rem;
+      padding: 0.55rem 0.65rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: #1a1a25;
+      color: #fff;
+      font-size: 0.88rem;
+      font-family: inherit;
+      resize: vertical;
+    }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-top: 1rem;
+    }
+    button {
+      padding: 0.55rem 1rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--card);
+      color: var(--cyan);
+      font-weight: 600;
+      cursor: pointer;
+      font-size: 0.88rem;
+    }
+    button.primary {
+      background: linear-gradient(135deg, rgba(0,245,212,0.2), rgba(247,37,133,0.12));
+      border-color: rgba(0,245,212,0.35);
+    }
+    button:active { opacity: 0.9; }
+    #out {
+      margin-top: 1rem;
+      padding: 0.75rem;
+      background: #15151f;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      font-size: 0.72rem;
+      color: var(--muted);
+      white-space: pre-wrap;
+      word-break: break-word;
+      max-height: 12rem;
+      overflow: auto;
+      display: none;
+    }
+    #out.visible { display: block; }
+    .note { font-size: 0.8rem; color: var(--muted); margin-top: 1rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <a href="research-notice.html" style="font-size:0.88rem">← Research notice</a>
+    <h1 style="margin-top:1rem">Post-task questionnaire</h1>
+    <p class="lead">
+      Short usability ratings after using the AR try-on prototype. This page does not send data anywhere: use <strong>Copy JSON</strong> or <strong>Download JSON</strong> and share the file only as agreed in your Participant Information Letter (e.g. by email to the researcher). Match the <strong>participant code</strong> to your session log filename if you exported one from the app.
+    </p>
+
+    <form id="q-form" onsubmit="return false;">
+      <fieldset>
+        <legend>Identifier</legend>
+        <label class="block" for="participant-code">Participant code (same as session log, if used)</label>
+        <input type="text" id="participant-code" maxlength="32" placeholder="e.g. P07" autocomplete="off">
+      </fieldset>
+
+      <fieldset>
+        <legend>Ratings (1 = strongly disagree / poor, 5 = strongly agree / excellent)</legend>
+
+        <label class="block">The prototype was easy to use.</label>
+        <div class="scale" data-name="ease_of_use"></div>
+
+        <label class="block">The shirt stayed visually stable and aligned reasonably well with my body.</label>
+        <div class="scale" data-name="visual_stability"></div>
+
+        <label class="block">I felt comfortable during the task (you may consider body image or embarrassment).</label>
+        <div class="scale" data-name="comfort"></div>
+
+        <label class="block">I would consider using something like this again for online clothes shopping.</label>
+        <div class="scale" data-name="would_use_again"></div>
+
+        <label class="block">Overall, the 3D shirt matched how I expect it to look on me.</label>
+        <div class="scale" data-name="alignment_confidence"></div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Optional comments</legend>
+        <label class="block" for="comments">Anything else (will be reported in anonymised form only)</label>
+        <textarea id="comments" maxlength="2000" placeholder="Optional"></textarea>
+      </fieldset>
+
+      <div class="actions">
+        <button type="button" class="primary" id="btn-build">Build JSON</button>
+        <button type="button" id="btn-copy">Copy JSON</button>
+        <button type="button" id="btn-dl">Download JSON</button>
+      </div>
+    </form>
+
+    <pre id="out" aria-live="polite"></pre>
+
+    <p class="note">
+      For context see <a href="research-notice.html">research notice</a> · <a href="../legacy/ar-tryon-v13.html">AR try-on (static)</a> · <a href="../apps/ar-tryon/">AR try-on (Vite)</a> · <a href="../index.html">index</a>
+    </p>
+  </div>
+
+  <script>
+    const scaleNames = ['ease_of_use', 'visual_stability', 'comfort', 'would_use_again', 'alignment_confidence'];
+    document.querySelectorAll('.scale[data-name]').forEach((div) => {
+      const name = div.dataset.name;
+      for (let v = 1; v <= 5; v++) {
+        const id = `${name}_${v}`;
+        const lab = document.createElement('label');
+        lab.className = 'choice';
+        lab.innerHTML = `<input type="radio" name="${name}" value="${v}" id="${id}"> <span>${v}</span>`;
+        const inp = lab.querySelector('input');
+        inp.addEventListener('change', () => {
+          div.querySelectorAll('label.choice').forEach((L) => L.classList.remove('picked'));
+          lab.classList.add('picked');
+        });
+        div.appendChild(lab);
+      }
+    });
+
+    function collectPayload() {
+      const ratings = {};
+      for (const n of scaleNames) {
+        const el = document.querySelector(`input[name="${n}"]:checked`);
+        ratings[n] = el ? parseInt(el.value, 10) : null;
+      }
+      return {
+        version: '1.0',
+        form: 'ar_tryon_post_task_questionnaire',
+        participantCode: (document.getElementById('participant-code').value || '').trim() || null,
+        completedAt: new Date().toISOString(),
+        ratings,
+        comments: (document.getElementById('comments').value || '').trim() || null
+      };
+    }
+
+    let lastJson = '';
+    const out = document.getElementById('out');
+
+    document.getElementById('btn-build').addEventListener('click', () => {
+      const payload = collectPayload();
+      lastJson = JSON.stringify(payload, null, 2);
+      out.textContent = lastJson;
+      out.classList.add('visible');
+    });
+
+    document.getElementById('btn-copy').addEventListener('click', async () => {
+      if (!lastJson) {
+        const payload = collectPayload();
+        lastJson = JSON.stringify(payload, null, 2);
+        out.textContent = lastJson;
+        out.classList.add('visible');
+      }
+      try {
+        await navigator.clipboard.writeText(lastJson);
+        alert('Copied to clipboard.');
+      } catch {
+        alert('Copy failed — select the text in the box below and copy manually.');
+      }
+    });
+
+    document.getElementById('btn-dl').addEventListener('click', () => {
+      if (!lastJson) {
+        const payload = collectPayload();
+        lastJson = JSON.stringify(payload, null, 2);
+        out.textContent = lastJson;
+        out.classList.add('visible');
+      }
+      const code = (collectPayload().participantCode || 'anon').replace(/[^a-zA-Z0-9_-]+/g, '') || 'anon';
+      const blob = new Blob([lastJson], { type: 'application/json' });
+      const a = document.createElement('a');
+      a.download = `tryon-questionnaire-${code}-${Date.now()}.json`;
+      a.href = URL.createObjectURL(blob);
+      a.click();
+      URL.revokeObjectURL(a.href);
+    });
+  </script>
+</body>
+</html>
