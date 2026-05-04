@@ -1,91 +1,325 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
-  <meta name="mobile-web-app-capable" content="yes">
-  <meta name="apple-mobile-web-app-capable" content="yes">
-  <title>Pix2Surf — Web</title>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Pix2Surf — Virtual Try-On Hub</title>
+  <meta name="description" content="Home page for the Pix2Surf dissertation project. Explore 2D and 3D virtual try-on experiences." />
+  <link rel="canonical" href="./" />
   <style>
     :root {
       --bg: #0a0a0f;
-      --card: #12121a;
-      --border: rgba(255,255,255,0.1);
-      --cyan: #00f5d4;
-      --muted: #8b8b9e;
+      --bg-card: #12121a;
+      --bg-card-hover: #181826;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(0, 245, 212, 0.4);
+      --text: #f5f5f7;
+      --text-muted: #8b8b9e;
+      --accent: #00f5d4;
+      --accent-dim: rgba(0, 245, 212, 0.15);
     }
+
     * { box-sizing: border-box; }
-    body {
-      font-family: system-ui, -apple-system, sans-serif;
-      background: var(--bg);
-      color: #fff;
+
+    html, body {
       margin: 0;
-      padding: max(1rem, env(safe-area-inset-top)) 1rem 1.5rem;
-      min-height: 100dvh;
-    }
-    h1 { font-size: 1.35rem; margin: 0 0 0.35rem; }
-    p.lead { color: var(--muted); margin: 0 0 1.25rem; font-size: 0.95rem; }
-    ul.links {
-      list-style: none;
       padding: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      background:
+        radial-gradient(1200px 600px at 85% -10%, rgba(0, 245, 212, 0.08), transparent 60%),
+        radial-gradient(900px 500px at -10% 110%, rgba(130, 87, 255, 0.08), transparent 60%),
+        var(--bg);
+    }
+
+    .page {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: clamp(2rem, 5vw, 4rem) clamp(1rem, 4vw, 2rem) 4rem;
+    }
+
+    header.hero {
+      margin-bottom: clamp(2rem, 4vw, 3rem);
+    }
+
+    .eyebrow {
+      display: inline-block;
+      font-size: 0.75rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-dim);
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      margin-bottom: 1rem;
+    }
+
+    h1 {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      line-height: 1.15;
+      margin: 0 0 0.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .lede {
+      max-width: 40rem;
       margin: 0;
+      color: var(--text-muted);
+      font-size: 1.05rem;
+      line-height: 1.55;
+    }
+
+    .section-title {
+      font-size: 0.8rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 2.5rem 0 1rem;
+      font-weight: 600;
+    }
+
+    .grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+    }
+
+    .card {
+      position: relative;
       display: flex;
       flex-direction: column;
-      gap: 0.65rem;
-    }
-    ul.links a {
-      display: block;
-      padding: 1rem 1.1rem;
-      background: var(--card);
+      gap: 1rem;
+      padding: 1.5rem;
+      background: var(--bg-card);
       border: 1px solid var(--border);
-      border-radius: 12px;
-      color: var(--cyan);
-      text-decoration: none;
+      border-radius: 14px;
+      transition: transform 0.15s ease, border-color 0.15s ease, background 0.15s ease;
+    }
+
+    .card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--border-hover);
+      transform: translateY(-2px);
+    }
+
+    .card[aria-disabled="true"] {
+      opacity: 0.55;
+    }
+
+    .card[aria-disabled="true"]:hover {
+      transform: none;
+      background: var(--bg-card);
+      border-color: var(--border);
+    }
+
+    .card-head {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .card-label {
+      font-size: 0.7rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
       font-weight: 600;
-      font-size: 1.05rem;
-      -webkit-tap-highlight-color: transparent;
+      padding: 0.25rem 0.55rem;
+      border-radius: 6px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text-muted);
     }
-    ul.links a:active { opacity: 0.85; }
-    ul.links span { display: block; font-size: 0.75rem; font-weight: 400; color: var(--muted); margin-top: 0.25rem; }
-    #lan-box {
-      margin-top: 1.5rem;
-      padding: 0.9rem;
-      background: #15151f;
+
+    .card-label.is-2d {
+      color: #9ec7ff;
+      background: rgba(80, 140, 255, 0.14);
+    }
+
+    .card-label.is-3d {
+      color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .card-label.is-soon {
+      color: #d9a86b;
+      background: rgba(217, 168, 107, 0.14);
+    }
+
+    .card h2 {
+      margin: 0;
+      font-size: 1.2rem;
+      font-weight: 600;
+      letter-spacing: -0.01em;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 0.92rem;
+      line-height: 1.5;
+      flex: 1;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      padding: 0.75rem 1rem;
       border-radius: 10px;
-      border: 1px solid var(--border);
-      font-size: 0.8rem;
-      color: var(--muted);
-      word-break: break-all;
+      background: var(--accent);
+      color: #0a0a0f;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      border: 0;
+      cursor: pointer;
+      transition: filter 0.15s ease, transform 0.1s ease;
     }
-    #lan-box strong { color: #fff; display: block; margin-bottom: 0.35rem; }
-    #lan-box a { color: var(--cyan); }
+
+    .btn:hover { filter: brightness(1.08); }
+    .btn:active { transform: translateY(1px); }
+
+    .btn.ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn.ghost:hover { border-color: var(--border-hover); color: var(--accent); }
+
+    .btn[aria-disabled="true"] {
+      pointer-events: none;
+      opacity: 0.6;
+    }
+
+    .btn .arrow {
+      transition: transform 0.15s ease;
+    }
+
+    .card:hover .btn:not([aria-disabled="true"]) .arrow {
+      transform: translateX(3px);
+    }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem 1.25rem;
+      justify-content: space-between;
+    }
+
+    footer a { color: var(--accent); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
-  <h1>Pix2Surf</h1>
-  <p class="lead">Open these pages in your phone’s browser (same Wi‑Fi as this PC). Camera may require HTTPS — see <a href="docs/TUNNELS.md" style="color:var(--cyan)">TUNNELS.md</a>. <a href="pages/research-notice.html" style="color:var(--cyan)">Research notice</a> · <a href="pages/research-questionnaire.html" style="color:var(--cyan)">Post-task questionnaire</a> (consented participants).</p>
-  <ul class="links">
-    <li><a href="apps/ar-tryon/">AR try-on <span>TypeScript + Tailwind (run <code>npm run dev</code> in <code>test/</code>)</span></a> · <a href="legacy/ar-tryon-v13.html">static v13</a></li>
-    <li><a href="pages/pipeline-dashboard.html">Pipeline dashboard <span>All roadmap stages, API health, LAN links</span></a></li>
-    <li><a href="pages/splat-viewer.html">3DGS viewer <span>Gaussian splat / PLY preview</span></a></li>
-    <li><a href="pages/hunyuan-studio.html">Hunyuan 3D <span>Tencent text/image → 3D; two-photo GLB → AR try-on</span></a></li>
-  </ul>
-  <div id="lan-box" hidden>
-    <strong>On this network</strong>
-    <span id="lan-lines"></span>
-  </div>
-  <script type="module">
-    try {
-      const r = await fetch('/api/server-info');
-      if (!r.ok) throw new Error(String(r.status));
-      const j = await r.json();
-      const box = document.getElementById('lan-box');
-      const lines = document.getElementById('lan-lines');
-      if (j.lan_ipv4 && j.urls?.lan_home) {
-        lines.innerHTML = `<a href="${j.urls.lan_tryon}">${j.urls.lan_tryon}</a>`;
-        box.hidden = false;
-      }
-    } catch { /* offline / file:// */ }
-  </script>
+  <main class="page">
+    <header class="hero">
+      <span class="eyebrow">Pix2Surf · Dissertation Project</span>
+      <h1>Virtual Try-On Hub</h1>
+      <p class="lede">
+        Explore different approaches to virtual garment try-on, from quick 2D image-based
+        previews to the full 3D AR prototype built for this dissertation.
+      </p>
+    </header>
+
+    <h2 class="section-title">Try-On Experiences</h2>
+    <div class="grid">
+
+      <article class="card">
+        <div class="card-head">
+          <h2>Google Shopping Try-On</h2>
+          <span class="card-label is-2d">2D</span>
+        </div>
+        <p>
+          Google's image-based virtual try-on. Upload a photo of yourself and preview how
+          different garments look using generative AI. Hosted externally by Google.
+        </p>
+        <a
+          class="btn"
+          href="https://www.google.com/shopping/tryon?udm=28&gl=us&hl=en&cs=0&sa=X&ved=0ahUKEwi3goTFm9eNAxVYYfUHHVORMHkQgP8PCBE&ref=blog.secondbrush.co.kr"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open Google Try-On
+          <span class="arrow" aria-hidden="true">↗</span>
+        </a>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>WANNA AR Try-On</h2>
+          <span class="card-label is-3d">3D · AR</span>
+        </div>
+        <p>
+          Commercial WebAR try-on by WANNA — renders a real 3D garment on top of the live
+          camera feed. Best experienced on mobile: use Safari on iOS or Chrome on Android.
+        </p>
+        <a
+          class="btn"
+          href="https://wanna-clothes.ar.wanna.fashion/?mode=3d&showonboarding=3d&modelid=WNCLO01"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open WANNA AR
+          <span class="arrow" aria-hidden="true">↗</span>
+        </a>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>Pix2Surf AR Prototype</h2>
+          <span class="card-label is-3d">3D · AR</span>
+        </div>
+        <p>
+          The dissertation prototype: real-time webcam AR try-on using a 3D garment
+          generated from front/back images, fitted to a pose-tracked body.
+        </p>
+        <a class="btn ghost" href="prototype.html">
+          Open Prototype Page
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+      </article>
+
+      <article class="card">
+        <div class="card-head">
+          <h2>SAM3 generated model</h2>
+          <span class="card-label is-3d">3D · AR</span>
+        </div>
+        <p>
+          A ready-made shirt mesh produced with SAM3 for virtual try-on. Opens the prototype page with a direct link
+          to load this model; start the camera and try it on immediately.
+        </p>
+        <a
+          class="btn"
+          href="dist/apps/ar-tryon/index.html?glb=/sam3/shirt_canonical.glb"
+        >
+          Open SAM3 try-on
+          <span class="arrow" aria-hidden="true">→</span>
+        </a>
+      </article>
+
+    </div>
+
+    <footer>
+      <span>Pix2Surf · MCAST Level 6 Dissertation</span>
+      <span>
+        Dev server:
+        <a href="http://localhost:5173/apps/ar-tryon/">localhost:5173</a>
+      </span>
+    </footer>
+  </main>
 </body>
 </html>

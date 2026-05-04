@@ -62,7 +62,7 @@ def main() -> None:
             "  2. Follow their README for checkpoints and dependencies\n"
             "  3. export HUMANSPLAT_REPO=/absolute/path/to/clone\n"
             "  4. Optionally export HUMANSPLAT_CMD='python their_entry.py'\n"
-            "  5. Re-run this wrapper or load the exported .ply in pages/splat-viewer.html\n",
+            "  5. Re-run this wrapper; view exported .ply / .splat in your preferred 3DGS viewer\n",
             file=sys.stderr,
         )
         sys.exit(2)
@@ -109,7 +109,7 @@ def main() -> None:
     r = subprocess.run(full, cwd=str(repo))
     if r.returncode != 0:
         sys.exit(r.returncode)
-    print(f"[HumanSplat] Done. Preview 3DGS exports in pages/splat-viewer.html if format is .ply/.splat.")
+    print("[HumanSplat] Done. Open the exported .ply / .splat in a 3DGS viewer of your choice.")
 
 
 if __name__ == "__main__":

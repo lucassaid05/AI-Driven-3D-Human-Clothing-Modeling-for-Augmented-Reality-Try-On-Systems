@@ -2,15 +2,50 @@
 Garment flat-lay preprocessing: background removal + foreground / print-region bbox.
 
 Used by server-local.py and pipeline/sam_segment.py so behaviour stays in sync.
+
+Handles difficult product shots: near-white jerseys, light-grey studio backdrops,
+and small holes inside the alpha mask after segmentation.
 """
 
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path
 from typing import Any, Optional, Tuple
 
 import numpy as np
+
+_rembg_session = None
+
+
+def _get_rembg_session():
+    """Reuse a lightweight rembg model (u2netp) — much faster than default u2net on CPU."""
+    global _rembg_session
+    if _rembg_session is not None:
+        return _rembg_session
+    from rembg import new_session
+
+    model = (os.environ.get("REMBG_MODEL") or "u2netp").strip() or "u2netp"
+    _rembg_session = new_session(model)
+    return _rembg_session
+
+
+def _maybe_downscale_for_rembg(img_pil, max_edge: int):
+    """Segmentation does not need 4K; cap longest side to keep CPU runs under ~2 min."""
+    from PIL import Image
+
+    if max_edge <= 0:
+        return img_pil, 1.0
+    w, h = img_pil.size
+    m = max(w, h)
+    if m <= max_edge:
+        return img_pil, 1.0
+    scale = max_edge / float(m)
+    nw = max(1, int(round(w * scale)))
+    nh = max(1, int(round(h * scale)))
+    resample = getattr(Image, "Resampling", Image).LANCZOS
+    return img_pil.resize((nw, nh), resample), scale
 
 
 def _bbox_from_mask(mask: np.ndarray, thresh: int = 8) -> Optional[Tuple[int, int, int, int]]:
@@ -21,6 +56,52 @@ def _bbox_from_mask(mask: np.ndarray, thresh: int = 8) -> Optional[Tuple[int, in
     x0, x1 = int(xs.min()), int(xs.max())
     y0, y1 = int(ys.min()), int(ys.max())
     return (x0, y0, x1 - x0 + 1, y1 - y0 + 1)
+
+
+def sidecar_mask_path(image_path: Path) -> Path:
+    """Canonical location of the garment alpha sidecar for a processed image."""
+    p = Path(image_path)
+    return p.with_name(p.stem + ".mask.png")
+
+
+def _write_mask_sidecar(dst_image: Path, alpha: np.ndarray, *, binarize_thresh: int = 16) -> Path:
+    """
+    Persist the garment silhouette next to the processed image so downstream
+    stages can skip brittle brightness-based foreground detection
+    (critical for white / light-coloured garments like cardigans).
+    """
+    from PIL import Image
+
+    mask_path = sidecar_mask_path(dst_image)
+    a = np.asarray(alpha).astype(np.uint8)
+    a = np.where(a > int(binarize_thresh), 255, 0).astype(np.uint8)
+    mask_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(a, mode="L").save(mask_path, "PNG", optimize=True)
+    return mask_path
+
+
+def _repair_alpha_holes(alpha: np.ndarray, *, kernel: int, iterations: int) -> np.ndarray:
+    """
+    Close small gaps inside the garment mask (common on cream/white fabric with rembg).
+    kernel/iterations 0 disables.
+    """
+    if kernel <= 0 or iterations <= 0:
+        return alpha
+    try:
+        import cv2
+    except ImportError:
+        return alpha
+    k = max(3, int(kernel))
+    if k % 2 == 0:
+        k += 1
+    el = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    a = alpha.astype(np.uint8)
+    _, a = cv2.threshold(a, 16, 255, cv2.THRESH_BINARY)
+    a = cv2.morphologyEx(a, cv2.MORPH_CLOSE, el, iterations=int(iterations))
+    # Remove tiny background speckles classified as foreground
+    a = cv2.morphologyEx(a, cv2.MORPH_OPEN, el, iterations=1)
+    a = cv2.GaussianBlur(a, (3, 3), 0)
+    return a
 
 
 def preprocess_garment_product_shot(src_path: Path, dst_path: Path) -> dict[str, Any]:
@@ -37,27 +118,44 @@ def preprocess_garment_product_shot(src_path: Path, dst_path: Path) -> dict[str,
     meta: dict[str, Any] = {
         "src": str(src_path.resolve()),
         "dst": str(dst_path.resolve()),
+        "mask": None,
         "method": None,
         "fg_bbox": None,
     }
 
-    try:
-        from rembg import remove as rembg_remove
+    fast = os.environ.get("GARMENT_PREPROCESS_FAST", "").strip().lower() in ("1", "true", "yes", "on")
 
-        img_pil = Image.open(src_path).convert("RGBA")
-        result = rembg_remove(img_pil)
-        alpha = np.array(result.split()[3])
-        meta["fg_bbox"] = _bbox_from_mask(alpha)
-        white = Image.new("RGBA", result.size, (255, 255, 255, 255))
-        white.paste(result, mask=result.split()[3])
-        white.convert("RGB").save(dst_path, "JPEG", quality=95)
-        meta["method"] = "rembg"
-        print(f"  [rembg] Background removed: {src_path.name} → {dst_path.name}")
-        return meta
-    except ImportError:
-        print("  [rembg] not installed — falling back to GrabCut")
-    except Exception as e:
-        print(f"  [rembg] failed ({e}) — falling back to GrabCut")
+    if not fast:
+        try:
+            from rembg import remove as rembg_remove
+
+            max_edge = int(os.environ.get("GARMENT_PREPROCESS_MAX_EDGE", "1280") or "1280")
+            img_pil = Image.open(src_path).convert("RGBA")
+            seg_pil, seg_scale = _maybe_downscale_for_rembg(img_pil, max_edge)
+            session = _get_rembg_session()
+            result = rembg_remove(seg_pil, session=session)
+            if seg_scale != 1.0:
+                result = result.resize(img_pil.size, Image.LANCZOS)
+            alpha = np.array(result.split()[3])
+            rk = int(os.environ.get("GARMENT_PREPROCESS_ALPHA_CLOSE_KERNEL", "5") or "5")
+            ri = int(os.environ.get("GARMENT_PREPROCESS_ALPHA_CLOSE_ITERS", "2") or "2")
+            alpha = _repair_alpha_holes(alpha, kernel=rk, iterations=ri)
+            meta["fg_bbox"] = _bbox_from_mask(alpha)
+            rgba = np.array(result)
+            rgba[:, :, 3] = alpha
+            result = Image.fromarray(rgba, mode="RGBA")
+            white = Image.new("RGBA", result.size, (255, 255, 255, 255))
+            white.paste(result, mask=result.split()[3])
+            white.convert("RGB").save(dst_path, "JPEG", quality=95)
+            mask_path = _write_mask_sidecar(dst_path, alpha)
+            meta["method"] = "rembg"
+            meta["mask"] = str(mask_path.resolve())
+            print(f"  [rembg] Background removed: {src_path.name} → {dst_path.name} (+ {mask_path.name})")
+            return meta
+        except ImportError:
+            print("  [rembg] not installed — falling back to GrabCut")
+        except Exception as e:
+            print(f"  [rembg] failed ({e}) — falling back to GrabCut")
 
     try:
         import cv2
@@ -89,13 +187,25 @@ def preprocess_garment_product_shot(src_path: Path, dst_path: Path) -> dict[str,
             np.uint8
         )
         cv2.imwrite(str(dst_path), composited, [cv2.IMWRITE_JPEG_QUALITY, 95])
+        mask_path = _write_mask_sidecar(dst_path, fg_mask)
         meta["method"] = "grabcut"
-        print(f"  [GrabCut] Background removed: {src_path.name} → {dst_path.name}")
+        meta["mask"] = str(mask_path.resolve())
+        print(f"  [GrabCut] Background removed: {src_path.name} → {dst_path.name} (+ {mask_path.name})")
         return meta
     except Exception as e:
         print(f"  [GrabCut] failed ({e}) — using raw image")
 
     shutil.copy2(src_path, dst_path)
+    try:
+        from PIL import Image
+
+        with Image.open(dst_path) as im:
+            w_px, h_px = im.size
+        full_mask = np.full((h_px, w_px), 255, dtype=np.uint8)
+        mask_path = _write_mask_sidecar(dst_path, full_mask)
+        meta["mask"] = str(mask_path.resolve())
+    except Exception as e:
+        print(f"  [passthrough] Could not write mask sidecar: {e}")
     meta["method"] = "passthrough"
     print(f"  [passthrough] No BG removal applied: {src_path.name}")
     return meta

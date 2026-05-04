@@ -7,9 +7,6 @@ opencv-python-headless>=4.5
 rembg>=2.0.50
 mediapipe>=0.10.0
 
-# Tencent Hunyuan 3D (international API — used by server /api/hunyuan/*)
-tencentcloud-sdk-python-intl-en>=3.1.0
-
 # Optional: Meta Segment Anything (person --engine sam)
 # torch  # install from pytorch.org for your CUDA/CPU
 # segment-anything  # pip install git+https://github.com/facebookresearch/segment-anything.git
