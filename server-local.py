@@ -2,19 +2,21 @@
 AR Try-On Server with Local GLB Generation
 
 This server:
-1. Serves static files (HTML, JS, CSS) — web UI only (no native app wrappers)
+1. Serves the hub page (index.html) at /, the prototype landing page at
+   /prototype.html, and the built AR try-on bundle under /dist/apps/ar-tryon/
 2. Provides API endpoints for GLB generation using tshirt_to_glb_pose_ready.py
 3. Handles CORS and Permissions-Policy so browsers on the LAN can use the site
-4. Binds to 0.0.0.0 so phones/tablets on the same Wi‑Fi can open the pages
+4. Binds to 0.0.0.0 so phones/tablets on the same Wi‑Fi can open the page
 
 Usage:
     python server-local.py
-    Open http://localhost:PORT/  (hub) or http://localhost:PORT/legacy/ar-tryon-v13.html
+    Open http://localhost:PORT/  — hub with Google 2D, WANNA, and Prototype cards
 
 Mobile:
     Startup prints a LAN URL (e.g. http://192.168.x.x:PORT/). Open that on your
     phone. If the camera is blocked (insecure context), use HTTPS via optional
     cert files (HTTPS_CERT / HTTPS_KEY in .env) or a tunnel — see docs/TUNNELS.md.
+    Or run `npm run dev` for Vite's HTTPS dev server on :5173.
 
     JSON helper: GET /api/server-info — origins and deep links for QR / bookmarks.
 
@@ -30,12 +32,16 @@ import subprocess
 import shutil
 import base64
 import urllib.parse
+import posixpath
 import uuid
 import threading
 import traceback
 import sys
 import time
 import re
+import ssl as ssl_module
+import urllib.error
+import urllib.request
 
 # Ensure Windows consoles don't crash on Unicode banners/emojis.
 if hasattr(sys.stdout, "reconfigure"):
@@ -82,6 +88,8 @@ CONFIG = {
     "SMPL_MODEL":    _e("SMPL_PKL",      "../../smpl/SMPL_NEUTRAL.pkl"),
     # Same OBJ as your reference GLB → same silhouette; only texture comes from photos.
     "GARMENT_OBJ":   _e("GARMENT_OBJ",   "../../pix2surf/assets/init_meshes/shirts.obj"),
+    # Optional pre-rigged template GLB (keeps original armature/weights, only swaps texture).
+    "GARMENT_TEMPLATE_GLB": _e("GARMENT_TEMPLATE_GLB", "../../manu_tshirt_smpl_ready.glb"),
     "BLENDER_BIN":   _e("BLENDER_BIN",   "blender"),
     "DEVICE":        _e("DEVICE",        "cpu"),
     "OUTPUT_DIR":    _e("OUTPUT_DIR",    "./generated"),
@@ -95,27 +103,40 @@ CONFIG = {
     "SMOOTH_ITERS": _e("SMOOTH_ITERS", "4"),
     # Kill subprocess if still running after this many seconds (default 5 min)
     "GEN_TIMEOUT_SEC": int(_e("GEN_TIMEOUT_SEC", "300")),
-    # Min longest side (px) for front/back before Pix2Surf; 0 = skip upscale (fastest)
-    "PREP_MIN_EDGE": int(_e("PREP_MIN_EDGE", "768")),
+    # Min longest side (px) for front/back before Pix2Surf; 0 = skip upscale (fastest). Higher helps logos/prints.
+    "PREP_MIN_EDGE": int(_e("PREP_MIN_EDGE", "896")),
+    # direct=photo-preserving (best for logos/text), hybrid=photo+Pix2Surf, pix2surf=neural warp only
+    "TEXTURE_MODE": _e("TEXTURE_MODE", "direct"),
+    # Bind/rest armature pose exported by tshirt_to_glb_pose_ready.py
+    "BIND_POSE": _e("BIND_POSE", "relaxed"),
+    # Landmark-anchored tile placement. The detected shoulder line of the
+    # uploaded photo is mapped to the mesh's shoulder UV row and the hem to
+    # the mesh's hem UV row, so the shoulders/sleeves of the printed graphic
+    # align with the 3D mesh's shoulders/sleeves — the shirt no longer sits
+    # above the user's shoulders.
+    #   TILE_ALIGN_TEMPLATE : "1" enabled (default), "0" legacy bbox-fit.
+    #   TILE_ALIGN_MODE     : "shoulder" (default) or "center" (legacy
+    #                         geometric-centre placement).
+    #   TILE_FILL_FRAC      : in shoulder mode, uniform scale on top of the
+    #                         landmark fit (1.0 = exact landmark span).
+    #                         In center mode, fraction of the tile the bbox
+    #                         fills on each axis (0.70 ≈ comfortable size).
+    #   TILE_SHOULDER_FRAC  : mesh shoulder UV row, default 0.12 (12% of tile
+    #                         height from the top).
+    #   TILE_HEM_FRAC       : mesh hem UV row, default 0.92.
+    "TILE_ALIGN_TEMPLATE": _e("TILE_ALIGN_TEMPLATE", "1"),
+    "TILE_ALIGN_MODE": _e("TILE_ALIGN_MODE", "shoulder"),
+    "TILE_FILL_FRAC": _e("TILE_FILL_FRAC", "1.0"),
+    "TILE_SHOULDER_FRAC": _e("TILE_SHOULDER_FRAC", "0.12"),
+    "TILE_HEM_FRAC": _e("TILE_HEM_FRAC", "0.92"),
     # Optional HTTPS (paths relative to this script’s folder). Create with mkcert or openssl.
     "HTTPS_CERT": _e("HTTPS_CERT", "").strip(),
     "HTTPS_KEY": _e("HTTPS_KEY", "").strip(),
 }
 
 HTTP_PORT = int(_e("PORT", "8000"))
-
-
-def _tencent_secret_id() -> str:
-    return _e("TENCENTCLOUD_SECRET_ID", "").strip() or _e("HUNYUAN_SECRET_ID", "").strip()
-
-
-def _tencent_secret_key() -> str:
-    return _e("TENCENTCLOUD_SECRET_KEY", "").strip() or _e("HUNYUAN_SECRET_KEY", "").strip()
-
-
-def _hunyuan_region() -> str:
-    r = _e("HUNYUAN_3D_REGION", "ap-singapore").strip()
-    return r if r else "ap-singapore"
+# Shown in logs /api/server-info so phones know which URL to use for `npm run dev` (Vite defaults to 5173).
+TRYON_VITE_PORT = int(_e("TRYON_VITE_PORT", "5173"))
 
 
 # Track generation tasks
@@ -142,156 +163,58 @@ def _error_recovery_hint(message: str) -> str:
     return "Check the server terminal log and .env paths; ensure photos are clear, front/back, good lighting."
 
 
-def _pipeline_meta_dict() -> dict:
-    """Full pipeline description for GET /api/pipeline (dashboard + integrations)."""
-    meta = {
-        "version": 2,
-        "live_route": {
-            "generate": "POST /api/generate",
-            "status": "GET /api/status/{task_id}",
-            "garments": "GET /api/garments",
-            "hunyuan_submit": "POST /api/hunyuan/submit",
-            "hunyuan_query": "GET /api/hunyuan/query?job_id=&edition=pro|rapid",
-        },
-        "inputs": {
-            "A": "person_photo",
-            "B": "flat_garment_image",
-        },
-        "stages": [
-            {
-                "order": 1,
-                "id": "sam",
-                "title": "Segmentation (SAM family)",
-                "implementation": "planned",
-                "summary": "Person + torso/shirt masks for crop, alignment, and fusion hooks.",
-                "tasks": ["mask_person", "mask_torso_shirt"],
-                "app_links": [{"label": "Pipeline dashboard", "path": "pages/pipeline-dashboard.html"}],
-                "cli_scripts": [{"path": "pipeline/sam_segment.py", "role": "batch_masks"}],
-            },
-            {
-                "order": 2,
-                "id": "human_recon",
-                "title": "Human reconstruction",
-                "implementation": "planned",
-                "summary": "HumanSplat or equivalent: person crop → 3D Gaussian human.",
-                "tasks": ["HumanSplat(person_crop) -> 3DGS"],
-                "reference": "https://humansplat.github.io/",
-                "app_links": [
-                    {"label": "3DGS viewer (preview exports)", "path": "pages/splat-viewer.html"},
-                    {"label": "Eval template", "path": "eval/HUMAN_SPLAT_vs_GLB.md"},
-                ],
-                "cli_scripts": [{"path": "pipeline/run_humansplat.py", "role": "batch_recon"}],
-            },
-            {
-                "order": 3,
-                "id": "garment",
-                "title": "Garment processing",
-                "implementation": "partial",
-                "summary": "Background removal and neural texture via Pix2Surf run in the live GLB path; print UV and inpainting still research.",
-                "tasks": [
-                    "remove_background",
-                    "estimate_print_region",
-                    "align_to_torso_uv",
-                    "inpaint_sides_back",
-                ],
-                "app_links": [
-                    {"label": "AR try-on + GLB generation", "path": "legacy/ar-tryon-v13.html"},
-                    {"label": "Garment script (CLI)", "path": "tshirt_to_glb_pose_ready.py"},
-                ],
-                "cli_scripts": [{"path": "tshirt_to_glb_pose_ready.py", "role": "live_glb_pipeline"}],
-            },
-            {
-                "order": 4,
-                "id": "fusion",
-                "title": "Appearance fusion",
-                "implementation": "partial",
-                "summary": "SMPL skinning and weight transfer onto garment mesh in the current exporter; splat-native fusion not wired yet.",
-                "tasks": ["blend_torso", "view_consistency_refinement"],
-                "app_links": [{"label": "AR try-on + GLB generation", "path": "legacy/ar-tryon-v13.html"}],
-            },
-            {
-                "order": 5,
-                "id": "export",
-                "title": "Export",
-                "implementation": "live",
-                "summary": "GLB + JSON under /generated/; load Gaussian PLY/splat in the web viewer when you have exports.",
-                "tasks": ["3dgs_viewer", "mesh_texture_fallback"],
-                "app_links": [
-                    {"label": "3DGS viewer", "path": "pages/splat-viewer.html"},
-                    {"label": "AR try-on (GLB + library)", "path": "legacy/ar-tryon-v13.html"},
-                ],
-            },
-        ],
-        "deployment": {
-            "primary": "tunnel",
-            "options": [
-                {"name": "ngrok", "url": "https://ngrok.com/"},
-                {
-                    "name": "cloudflare_tunnel",
-                    "url": "https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/",
-                },
-                {"name": "noip", "url": "https://www.noip.com/"},
-                {"name": "vercel", "note": "static UI only; generation stays local or separate backend"},
-            ],
-        },
-        "related_sota": {
-            "hunyuan3d": "https://3d.hunyuanglobal.com/",
-        },
-        "integrations": {
-            "hunyuan3d": {
-                "configured": bool(_tencent_secret_id() and _tencent_secret_key()),
-                "region": _hunyuan_region(),
-                "studio_page": "pages/hunyuan-studio.html",
-                "submit": "POST /api/hunyuan/submit",
-                "query": "GET /api/hunyuan/query?job_id=&edition=pro|rapid",
-                "tencent_docs": "https://www.tencentcloud.com/document/product/1284/75287",
-                "product_site": "https://3d.hunyuanglobal.com/",
-            }
-        },
-        "docs": {
-            "roadmap_md": "docs/ROADMAP.md",
-            "architecture_md": "pipeline/ARCHITECTURE.md",
-            "tunnels_md": "docs/TUNNELS.md",
-            "hunyuan_eval_md": "docs/HUNYUAN_EVAL.md",
-        },
-    }
-    srv = _SERVER_DIR
-    if (srv / "pipeline" / "sam_segment.py").is_file():
-        for st in meta["stages"]:
-            if st["id"] == "sam":
-                st["implementation"] = "partial"
-                st["summary"] = (
-                    "Offline CLI (MediaPipe selfie, rembg, optional SAM checkpoint): person_mask.png, "
-                    "torso_shirt_mask.png. Live try-on still uses in-browser MediaPipe; run sam_segment.py for crops / 3DGS prep."
-                )
-    if (srv / "pipeline" / "run_humansplat.py").is_file():
-        for st in meta["stages"]:
-            if st["id"] == "human_recon":
-                st["implementation"] = "partial"
-                st["summary"] = (
-                    "Wrapper when HUMANSPLAT_REPO is set (pipeline/run_humansplat.py). "
-                    "Preview exports in pages/splat-viewer.html. Not chained into POST /api/generate yet."
-                )
-    for st in meta["stages"]:
-        if st["id"] == "garment":
-            st["summary"] = (
-                "Shared preprocessor (pipeline/garment_preprocess.py): rembg → GrabCut → passthrough; "
-                "foreground bbox saved in garment_preprocess.json per generate task. Pix2Surf + template mesh for UV."
-            )
-    return meta
-
-
 def _lan_ipv4():
+    """
+    Best-effort LAN IPv4 for URLs shown to phones. UDP 'connect' to 8.8.8.8 often works but fails offline or
+    on locked-down networks — fall back to resolving the hostname's non-loopback addresses.
+    """
+    import socket
+
+    def _is_private_lan(a: str) -> bool:
+        if a.startswith("127.") or a == "0.0.0.0":
+            return False
+        # RFC1918 + link-local (common for some USB tethering)
+        if a.startswith("10.") or a.startswith("192.168."):
+            return True
+        if a.startswith("169.254."):
+            return True
+        if a.startswith("172."):
+            try:
+                second = int(a.split(".")[1])
+                return 16 <= second <= 31
+            except (ValueError, IndexError):
+                return False
+        return False
+
     try:
-        import socket
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.settimeout(0.2)
+        s.settimeout(0.35)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        if ip and _is_private_lan(ip):
+            return ip
     except Exception:
-        return None
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        candidates = []
+        for res in socket.getaddrinfo(hostname, None, socket.AF_INET, socket.SOCK_STREAM):
+            ip = res[4][0]
+            if _is_private_lan(ip):
+                candidates.append(ip)
+        if candidates:
+            # Prefer 192.168.x.x then 10.x then 172.16–31 then 169.254
+            for pref in ("192.168.", "10.", "172.", "169.254."):
+                for c in candidates:
+                    if c.startswith(pref):
+                        return c
+            return candidates[0]
+    except Exception:
+        pass
+
+    return None
 
 
 def _resolve_https_cert_paths():
@@ -314,12 +237,13 @@ def _server_public_urls(scheme: str):
     base_local = f"{scheme}://{host}:{port}"
     lan = _lan_ipv4()
     base_lan = f"{scheme}://{lan}:{port}" if lan else None
+    # Surface the hub, the prototype landing page, and the built AR try-on.
+    # "/" now serves the hub (index.html); the prototype page links onward to
+    # the built app under /dist/apps/ar-tryon/.
     pages = {
         "home": "/",
-        "tryon": "/legacy/ar-tryon-v13.html",
-        "dashboard": "/pages/pipeline-dashboard.html",
-        "splat": "/pages/splat-viewer.html",
-        "hunyuan": "/pages/hunyuan-studio.html",
+        "prototype": "/prototype.html",
+        "tryon": "/dist/apps/ar-tryon/index.html",
     }
     out = {"localhost": {k: base_local + v for k, v in pages.items()}}
     if base_lan:
@@ -327,9 +251,39 @@ def _server_public_urls(scheme: str):
     return out
 
 
+def _static_extensions_map():
+    """Windows http.server often serves .js as text/plain — browsers reject ES modules. Merge safe types."""
+    base = dict(getattr(SimpleHTTPRequestHandler, "extensions_map", {}))
+    base.update(
+        {
+            ".js": "application/javascript",
+            ".mjs": "application/javascript",
+            ".cjs": "application/javascript",
+            ".ts": "application/javascript",
+            ".tsx": "application/javascript",
+            ".json": "application/json",
+            ".css": "text/css; charset=utf-8",
+            ".wasm": "application/wasm",
+            ".svg": "image/svg+xml",
+            ".webp": "image/webp",
+            ".woff2": "font/woff2",
+        }
+    )
+    return base
+
+
 class APIHandler(SimpleHTTPRequestHandler):
     """HTTP handler with API endpoints and CORS support"""
-    
+
+    extensions_map = _static_extensions_map()
+
+    def guess_type(self, path):
+        """Windows mimetypes often label .ts/.js as text/plain; ES modules require application/javascript."""
+        _base, ext = posixpath.splitext(path)
+        if ext.lower() in (".ts", ".tsx"):
+            return "application/javascript", None
+        return super().guess_type(path)
+
     def end_headers(self):
         """Add CORS + Permissions-Policy so mobile browsers may request camera/mic on this origin."""
         self.send_header('Access-Control-Allow-Origin', '*')
@@ -340,6 +294,10 @@ class APIHandler(SimpleHTTPRequestHandler):
             'Permissions-Policy',
             'camera=(self), microphone=(self), fullscreen=(self), display-capture=(self)',
         )
+        p = (getattr(self, "path", None) or "").lower()
+        # Do not let phones/ngrok sit on an old dist/ bundle — run npm run build after UI changes.
+        if "/dist/" in p and (p.endswith(".js") or p.endswith(".html") or p.endswith(".css") or p.endswith(".map")):
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
         super().end_headers()
     
     def do_OPTIONS(self):
@@ -350,19 +308,52 @@ class APIHandler(SimpleHTTPRequestHandler):
     def do_GET(self):
         """Handle GET requests"""
         parsed = urllib.parse.urlparse(self.path)
-        
+        path_lc = parsed.path.lower()
+        # Static quick-generation presets are kept in public/ for Vite.
+        # Mirror /quick-generation/* to /public/quick-generation/* for python server-local.py.
+        if parsed.path.startswith("/quick-generation/"):
+            mapped = "/public" + parsed.path
+            candidate = (_SERVER_DIR / mapped.lstrip("/")).resolve()
+            if candidate.is_file():
+                self.path = mapped
+                return super().do_GET()
+        # SAM3 / other static GLBs live under public/sam3/; Vite serves them as /sam3/* — mirror for python server-local.py.
+        if parsed.path.startswith("/sam3/"):
+            mapped = "/public" + parsed.path
+            candidate = (_SERVER_DIR / mapped.lstrip("/")).resolve()
+            if candidate.is_file():
+                self.path = mapped
+                return super().do_GET()
+        # "/" serves index.html (the hub page) via SimpleHTTPRequestHandler's
+        # directory-index logic. No redirect — each card on the hub navigates
+        # to its own destination (prototype.html, external URLs, etc.).
+
+        # Source HTML loads /src/*.ts — only Vite can execute that. Prefer the built bundle on this server.
+        if path_lc.rstrip("/") in ("/apps/ar-tryon", "/apps/ar-tryon/index.html"):
+            self.send_response(302)
+            self.send_header("Location", "/dist/apps/ar-tryon/index.html")
+            self.end_headers()
+            return
+        # If the dev HTML was opened here anyway, map entry assets to the Rollup bundle (requires `npm run build`).
+        if path_lc == "/src/apps/ar-tryon/main.ts":
+            self.send_response(302)
+            self.send_header("Location", "/dist/assets/ar-tryon.js")
+            self.end_headers()
+            return
+        if path_lc == "/src/apps/ar-tryon/ar-tryon.css":
+            self.send_response(302)
+            self.send_header("Location", "/dist/assets/ar-tryon.css")
+            self.end_headers()
+            return
+
         if parsed.path == '/api/config':
             self.handle_config()
         elif parsed.path == '/api/health':
             self.handle_health()
         elif parsed.path == '/api/garments':
             self.handle_garment_list()
-        elif parsed.path == '/api/pipeline':
-            self.handle_pipeline_meta()
         elif parsed.path == '/api/server-info':
             self.handle_server_info()
-        elif parsed.path == '/api/hunyuan/query':
-            self.handle_hunyuan_query(parsed)
         elif parsed.path.startswith('/api/status/'):
             task_id = parsed.path.split('/')[-1]
             self.handle_status(task_id)
@@ -377,8 +368,6 @@ class APIHandler(SimpleHTTPRequestHandler):
         
         if parsed.path == '/api/generate':
             self.handle_generate()
-        elif parsed.path == '/api/hunyuan/submit':
-            self.handle_hunyuan_submit()
         else:
             self.send_error(404)
     
@@ -390,16 +379,20 @@ class APIHandler(SimpleHTTPRequestHandler):
             "pix2surf_available": (server_dir / CONFIG["PIX2SURF_ROOT"]).is_dir(),
             "smpl_available": (server_dir / CONFIG["SMPL_MODEL"]).is_file(),
             "garment_obj_available": (server_dir / CONFIG["GARMENT_OBJ"]).is_file(),
+            "garment_template_glb_available": (server_dir / CONFIG["GARMENT_TEMPLATE_GLB"]).is_file(),
             "blender_available": shutil.which(CONFIG["BLENDER_BIN"]) is not None or Path(CONFIG["BLENDER_BIN"]).is_file(),
             "script_available": (server_dir / CONFIG["SCRIPT_PATH"]).is_file(),
             "device": CONFIG["DEVICE"],
             "subdivide_iters": int(CONFIG["SUBDIVIDE_ITERS"]),
             "gen_timeout_sec": int(CONFIG["GEN_TIMEOUT_SEC"]),
             "prep_min_edge": int(CONFIG["PREP_MIN_EDGE"]),
+            "texture_mode": str(CONFIG["TEXTURE_MODE"]),
+            "bind_pose": str(CONFIG["BIND_POSE"]),
             "paths": {
                 "pix2surf": str((server_dir / CONFIG["PIX2SURF_ROOT"]).resolve()),
                 "smpl": str((server_dir / CONFIG["SMPL_MODEL"]).resolve()),
                 "garment": str((server_dir / CONFIG["GARMENT_OBJ"]).resolve()),
+                "garment_template_glb": str((server_dir / CONFIG["GARMENT_TEMPLATE_GLB"]).resolve()),
                 "blender": CONFIG["BLENDER_BIN"],
                 "script": str((server_dir / CONFIG["SCRIPT_PATH"]).resolve()),
             }
@@ -411,9 +404,6 @@ class APIHandler(SimpleHTTPRequestHandler):
             config_status["blender_available"],
             config_status["script_available"],
         ])
-        config_status["hunyuan_configured"] = bool(_tencent_secret_id() and _tencent_secret_key())
-        config_status["hunyuan_region"] = _hunyuan_region()
-
         self.send_json(config_status)
 
     def handle_health(self):
@@ -426,10 +416,13 @@ class APIHandler(SimpleHTTPRequestHandler):
         scheme = "https" if cert_path else "http"
         lan = _lan_ipv4()
         urls = _server_public_urls(scheme)
+        # Vite uses @vitejs/plugin-basic-ssl — HTTPS on dev + preview so phone cameras work on LAN.
+        lan_vite = f"https://{lan}:{TRYON_VITE_PORT}/apps/ar-tryon/" if lan else None
         self.send_json(
             {
                 "scheme": scheme,
                 "port": HTTP_PORT,
+                "tryon_vite_port": TRYON_VITE_PORT,
                 "lan_ipv4": lan,
                 "https_enabled": bool(cert_path),
                 "urls": {
@@ -437,19 +430,22 @@ class APIHandler(SimpleHTTPRequestHandler):
                     "localhost_tryon": urls["localhost"]["tryon"],
                     "lan_home": urls.get("lan", {}).get("home"),
                     "lan_tryon": urls.get("lan", {}).get("tryon"),
+                    "lan_tryon_vite": lan_vite,
                 },
                 "all": urls,
                 "camera_hint": (
-                    "Many mobile browsers only allow getUserMedia on https:// or http://localhost. "
-                    "If the camera fails on a LAN IP over HTTP, set HTTPS_CERT and HTTPS_KEY in .env "
-                    "or use ngrok / Cloudflare Tunnel (see docs/TUNNELS.md)."
+                    "`npm run dev` serves HTTPS (self-signed) on port "
+                    f"{TRYON_VITE_PORT} so the phone camera works on your LAN IP. Tap Advanced / Continue if the "
+                    "browser warns about the certificate. For static pages on this Python server only, use "
+                    "HTTPS_CERT and HTTPS_KEY in .env or a tunnel — see docs/TUNNELS.md."
+                ),
+                "vite_hint": (
+                    "For the TypeScript AR try-on, run `npm run dev` (HTTPS on all interfaces) and on your phone open "
+                    f"https://<this-PC-LAN-IP>:{TRYON_VITE_PORT}/apps/ar-tryon/ — accept the certificate warning once. "
+                    "Keep python server-local.py running on this PC for /api/generate. Windows: allow Node through the firewall."
                 ),
             }
         )
-
-    def handle_pipeline_meta(self):
-        """Machine-readable roadmap stages for dashboard / external tools."""
-        self.send_json(_pipeline_meta_dict())
 
     def handle_garment_list(self):
         """List completed GLBs under OUTPUT_DIR (for demo carousel / quick reload)."""
@@ -474,126 +470,6 @@ class APIHandler(SimpleHTTPRequestHandler):
                         }
                     )
         self.send_json({"garments": items[:40]})
-
-    def handle_hunyuan_submit(self):
-        """POST JSON: submit Tencent Hunyuan 3D Pro or Rapid job (text or image)."""
-        try:
-            if not (_tencent_secret_id() and _tencent_secret_key()):
-                self.send_json(
-                    {
-                        "error": "Hunyuan credentials not configured",
-                        "hint": "Set TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY in .env "
-                        "(or HUNYUAN_SECRET_ID / HUNYUAN_SECRET_KEY). See docs/HUNYUAN_EVAL.md.",
-                    },
-                    503,
-                )
-                return
-            content_length = int(self.headers.get("Content-Length", 0))
-            body = self.rfile.read(content_length)
-            data = json.loads(body.decode("utf-8")) if content_length else {}
-            edition = (data.get("edition") or "pro").strip().lower()
-            if edition not in ("pro", "rapid"):
-                self.send_json({"error": 'edition must be "pro" or "rapid"'}, 400)
-                return
-            region = (data.get("region") or "").strip() or _hunyuan_region()
-            prompt = data.get("prompt")
-            image = data.get("image") or data.get("image_base64")
-            image_url = data.get("image_url")
-
-            try:
-                from pipeline.hunyuan3d_client import submit_job
-            except ImportError:
-                self.send_json(
-                    {
-                        "error": "Tencent Cloud SDK not installed",
-                        "hint": "pip install tencentcloud-sdk-python-intl-en",
-                    },
-                    501,
-                )
-                return
-
-            kwargs = {
-                "region": region,
-                "edition": edition,
-                "secret_id": _tencent_secret_id(),
-                "secret_key": _tencent_secret_key(),
-                "prompt": prompt,
-                "image_base64": image,
-                "image_url": image_url,
-            }
-            if edition == "pro":
-                if data.get("model"):
-                    kwargs["model"] = str(data["model"]).strip()
-                if "enable_pbr" in data:
-                    kwargs["enable_pbr"] = bool(data["enable_pbr"])
-                if data.get("face_count") is not None:
-                    kwargs["face_count"] = int(data["face_count"])
-                if data.get("generate_type"):
-                    kwargs["generate_type"] = str(data["generate_type"]).strip()
-                if data.get("polygon_type"):
-                    kwargs["polygon_type"] = str(data["polygon_type"]).strip()
-            else:
-                if "enable_pbr" in data:
-                    kwargs["enable_pbr"] = bool(data["enable_pbr"])
-                if "enable_geometry" in data:
-                    kwargs["enable_geometry"] = bool(data["enable_geometry"])
-                if data.get("result_format"):
-                    kwargs["result_format"] = str(data["result_format"]).strip()
-
-            job_id = submit_job(**kwargs)
-            self.send_json({"job_id": job_id, "edition": edition, "region": region})
-        except ValueError as e:
-            self.send_json({"error": str(e)}, 400)
-        except Exception as e:
-            traceback.print_exc()
-            self.send_json({"error": str(e), "hint": _error_recovery_hint(str(e))}, 500)
-
-    def handle_hunyuan_query(self, parsed):
-        """GET: ?job_id=…&edition=pro|rapid&region=…"""
-        try:
-            if not (_tencent_secret_id() and _tencent_secret_key()):
-                self.send_json(
-                    {
-                        "error": "Hunyuan credentials not configured",
-                        "hint": "Set TENCENTCLOUD_SECRET_ID and TENCENTCLOUD_SECRET_KEY in .env",
-                    },
-                    503,
-                )
-                return
-            q = urllib.parse.parse_qs(parsed.query or "")
-            job_id = (q.get("job_id") or [""])[0].strip()
-            if not job_id:
-                self.send_json({"error": "job_id query parameter required"}, 400)
-                return
-            edition = (q.get("edition") or ["pro"])[0].strip().lower()
-            if edition not in ("pro", "rapid"):
-                self.send_json({"error": "edition must be pro or rapid"}, 400)
-                return
-            region = (q.get("region") or [""])[0].strip() or _hunyuan_region()
-
-            try:
-                from pipeline.hunyuan3d_client import query_job
-            except ImportError:
-                self.send_json(
-                    {
-                        "error": "Tencent Cloud SDK not installed",
-                        "hint": "pip install tencentcloud-sdk-python-intl-en",
-                    },
-                    501,
-                )
-                return
-
-            result = query_job(
-                job_id,
-                region=region,
-                edition=edition,
-                secret_id=_tencent_secret_id(),
-                secret_key=_tencent_secret_key(),
-            )
-            self.send_json({"job_id": job_id, "edition": edition, **result})
-        except Exception as e:
-            traceback.print_exc()
-            self.send_json({"error": str(e)}, 500)
 
     def handle_generate(self):
         """Handle GLB generation request"""
@@ -759,6 +635,7 @@ class APIHandler(SimpleHTTPRequestHandler):
             pix2surf_root = (server_dir / CONFIG["PIX2SURF_ROOT"]).resolve()
             smpl_model = (server_dir / CONFIG["SMPL_MODEL"]).resolve()
             garment_obj = (server_dir / CONFIG["GARMENT_OBJ"]).resolve()
+            garment_template_glb = (server_dir / CONFIG["GARMENT_TEMPLATE_GLB"]).resolve()
             
             cmd = [
                 "python", str(script_path),
@@ -775,8 +652,12 @@ class APIHandler(SimpleHTTPRequestHandler):
                 "--center",
                 "--subdivide_iters", str(CONFIG["SUBDIVIDE_ITERS"]),
                 "--prep_min_edge", str(CONFIG["PREP_MIN_EDGE"]),
+                "--texture_mode", str(CONFIG["TEXTURE_MODE"]),
+                "--bind_pose", str(CONFIG["BIND_POSE"]),
                 "--workdir", str(work_dir / "_work"),
             ]
+            if garment_template_glb.is_file():
+                cmd.extend(["--garment_template_glb", str(garment_template_glb)])
             
             print(f"[TASK {task_id}] Running command:")
             print(f"  {' '.join(cmd)}")
@@ -790,6 +671,11 @@ class APIHandler(SimpleHTTPRequestHandler):
             utf8_env["PYTHONIOENCODING"] = "utf-8"
             utf8_env["PYTHONUTF8"] = "1"
             utf8_env["PYTHONUNBUFFERED"] = "1"
+            utf8_env["GARMENT_TILE_ALIGN_TEMPLATE"] = str(CONFIG["TILE_ALIGN_TEMPLATE"])
+            utf8_env["GARMENT_TILE_ALIGN_MODE"] = str(CONFIG["TILE_ALIGN_MODE"])
+            utf8_env["GARMENT_TILE_FILL_FRAC"] = str(CONFIG["TILE_FILL_FRAC"])
+            utf8_env["GARMENT_TILE_SHOULDER_FRAC"] = str(CONFIG["TILE_SHOULDER_FRAC"])
+            utf8_env["GARMENT_TILE_HEM_FRAC"] = str(CONFIG["TILE_HEM_FRAC"])
 
             gen_timeout = max(60, int(CONFIG["GEN_TIMEOUT_SEC"]))
             start_time = time.time()
@@ -1066,6 +952,12 @@ def check_config():
     else:
         issues.append(f"  ❌ GARMENT_OBJ not found: {garment_path}")
 
+    garment_template = (server_dir / CONFIG["GARMENT_TEMPLATE_GLB"]).resolve()
+    if garment_template.is_file():
+        print(f"  ✓ GARMENT_TEMPLATE_GLB: {garment_template}")
+    else:
+        print(f"  ℹ GARMENT_TEMPLATE_GLB not found (optional): {garment_template}")
+
     blender_val = CONFIG["BLENDER_BIN"]
     if shutil.which(blender_val) is not None or Path(blender_val).is_file():
         print(f"  ✓ BLENDER_BIN: {blender_val}")
@@ -1080,6 +972,7 @@ def check_config():
 
     print(f"  ℹ DEVICE:     {CONFIG['DEVICE']}")
     print(f"  ℹ PREP_MIN_EDGE: {CONFIG['PREP_MIN_EDGE']}")
+    print(f"  ℹ TEXTURE_MODE: {CONFIG['TEXTURE_MODE']}")
     print(f"  ℹ OUTPUT_DIR: {(server_dir / CONFIG['OUTPUT_DIR']).resolve()}")
 
     if issues:
@@ -1125,15 +1018,21 @@ def run_server():
         httpd.socket = ctx.wrap_socket(httpd.socket, server_side=True)
         print(f"🔒 HTTPS enabled ({cert_path.name} / {key_path.name})")
 
-    hub = "index.html" if "index.html" in html_files else (html_files[0] if html_files else "legacy/ar-tryon-v13.html")
+    # "/" serves the hub (index.html). The prototype lives at /prototype.html
+    # and launches the built AR try-on under /dist/apps/ar-tryon/.
     lan = _lan_ipv4()
     print(f"\n🚀 Server ({scheme}) — listening on 0.0.0.0:{HTTP_PORT} (all interfaces)")
-    print(f"   This machine:  {scheme}://localhost:{HTTP_PORT}/{hub}")
+    print(f"   This machine:  {scheme}://localhost:{HTTP_PORT}/   ← hub (Google 2D · WANNA · Prototype)")
+    print(f"   Prototype:     {scheme}://localhost:{HTTP_PORT}/prototype.html")
+    print(f"   AR try-on:     {scheme}://localhost:{HTTP_PORT}/dist/apps/ar-tryon/index.html")
     if lan:
-        print(f"   Phone (LAN):   {scheme}://{lan}:{HTTP_PORT}/{hub}  ← same Wi‑Fi")
+        print(f"   Phone (LAN):   {scheme}://{lan}:{HTTP_PORT}/   ← same Wi‑Fi")
+        print(
+            f"   AR try-on dev: https://{lan}:{TRYON_VITE_PORT}/apps/ar-tryon/  ← `npm run dev` (HTTPS for phone camera)"
+        )
     print(f"   Server info:   {scheme}://localhost:{HTTP_PORT}/api/server-info")
     print(
-        "   API:  GET /api/garments — list GLBs · POST /api/hunyuan/submit — Tencent Hunyuan 3D (if .env)\n"
+        "   API:  GET /api/garments — list GLBs · POST /api/generate — queue a job\n"
     )
 
     try:
@@ -1148,17 +1047,15 @@ if __name__ == "__main__":
 ║       AR Try-On Server with Local GLB Generation             ║
 ╠══════════════════════════════════════════════════════════════╣
 ║                                                              ║
-║  📁 Static Files:   http://localhost:8000                    ║
+║  📁 Page:  http://localhost:8000/  (AR try-on only)          ║
 ║  🔧 API Endpoints:                                           ║
-║     GET  /api/config     - Check server configuration        ║
-║     POST /api/generate   - Start GLB generation              ║
-║     GET  /api/status/X   - Check task status                 ║
-║     GET  /api/garments   - List saved GLBs (carousel)        ║
-║     GET  /api/pipeline   - Roadmap stages (JSON)             ║
-║     GET  /api/server-info- LAN URLs + mobile / camera hints  ║
-║     POST /api/hunyuan/submit - Hunyuan 3D job (needs .env keys)║
-║     GET  /api/hunyuan/query  - Poll job (job_id & edition)   ║
-║     GET  /generated/*    - Download generated files          ║
+║     GET  /api/health      - Liveness ping                    ║
+║     GET  /api/config      - Server configuration status      ║
+║     POST /api/generate    - Start GLB generation             ║
+║     GET  /api/status/X    - Poll a generation task           ║
+║     GET  /api/garments    - List saved GLBs (library)        ║
+║     GET  /api/server-info - LAN URLs + mobile camera hints   ║
+║     GET  /generated/*     - Download generated files         ║
 ║                                                              ║
 ╚══════════════════════════════════════════════════════════════╝
     """)

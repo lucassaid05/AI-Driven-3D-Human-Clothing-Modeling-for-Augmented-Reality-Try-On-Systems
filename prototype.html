@@ -1,0 +1,310 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Pix2Surf — AR Prototype</title>
+  <meta name="description" content="Dissertation prototype: real-time webcam AR try-on using a 3D garment generated from front/back images." />
+  <link rel="canonical" href="./prototype.html" />
+  <style>
+    :root {
+      --bg: #0a0a0f;
+      --bg-card: #12121a;
+      --bg-card-hover: #181826;
+      --border: rgba(255, 255, 255, 0.08);
+      --border-hover: rgba(0, 245, 212, 0.4);
+      --text: #f5f5f7;
+      --text-muted: #8b8b9e;
+      --accent: #00f5d4;
+      --accent-dim: rgba(0, 245, 212, 0.15);
+    }
+
+    * { box-sizing: border-box; }
+
+    html, body {
+      margin: 0;
+      padding: 0;
+      min-height: 100dvh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    body {
+      background:
+        radial-gradient(1200px 600px at 85% -10%, rgba(0, 245, 212, 0.08), transparent 60%),
+        radial-gradient(900px 500px at -10% 110%, rgba(130, 87, 255, 0.08), transparent 60%),
+        var(--bg);
+    }
+
+    .page {
+      max-width: 880px;
+      margin: 0 auto;
+      padding: clamp(2rem, 5vw, 4rem) clamp(1rem, 4vw, 2rem) 4rem;
+    }
+
+    .back-link {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      color: var(--text-muted);
+      text-decoration: none;
+      font-size: 0.9rem;
+      margin-bottom: 2rem;
+      transition: color 0.15s ease;
+    }
+
+    .back-link:hover { color: var(--accent); }
+
+    .eyebrow {
+      display: inline-block;
+      font-size: 0.75rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--accent);
+      background: var(--accent-dim);
+      padding: 0.35rem 0.7rem;
+      border-radius: 999px;
+      margin-bottom: 1rem;
+    }
+
+    h1 {
+      font-size: clamp(1.8rem, 4vw, 2.6rem);
+      line-height: 1.15;
+      margin: 0 0 0.75rem;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .lede {
+      max-width: 44rem;
+      margin: 0 0 2.5rem;
+      color: var(--text-muted);
+      font-size: 1.05rem;
+      line-height: 1.55;
+    }
+
+    .launch-card {
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+      padding: 1.75rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      margin-bottom: 2.5rem;
+    }
+
+    .launch-head {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
+
+    .launch-head h2 {
+      margin: 0;
+      font-size: 1.25rem;
+      font-weight: 600;
+    }
+
+    .badge {
+      font-size: 0.7rem;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      font-weight: 600;
+      padding: 0.25rem 0.55rem;
+      border-radius: 6px;
+      color: var(--accent);
+      background: var(--accent-dim);
+    }
+
+    .launch-card p {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 0.95rem;
+      line-height: 1.55;
+    }
+
+    .btn-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+      margin-top: 0.5rem;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 0.4rem;
+      padding: 0.8rem 1.1rem;
+      border-radius: 10px;
+      background: var(--accent);
+      color: #0a0a0f;
+      font-weight: 600;
+      font-size: 0.95rem;
+      text-decoration: none;
+      border: 0;
+      cursor: pointer;
+      transition: filter 0.15s ease, transform 0.1s ease;
+    }
+
+    .btn:hover { filter: brightness(1.08); }
+    .btn:active { transform: translateY(1px); }
+
+    .btn.ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn.ghost:hover { border-color: var(--border-hover); color: var(--accent); }
+
+    .section-title {
+      font-size: 0.8rem;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+      color: var(--text-muted);
+      margin: 0 0 1rem;
+      font-weight: 600;
+    }
+
+    .info-grid {
+      display: grid;
+      gap: 1rem;
+      grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+    }
+
+    .info-card {
+      padding: 1.25rem;
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+    }
+
+    .info-card h3 {
+      margin: 0 0 0.4rem;
+      font-size: 0.95rem;
+      font-weight: 600;
+      color: var(--text);
+    }
+
+    .info-card p {
+      margin: 0;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      line-height: 1.5;
+    }
+
+    .note {
+      margin-top: 1.5rem;
+      padding: 1rem 1.1rem;
+      border-left: 3px solid var(--accent);
+      background: rgba(0, 245, 212, 0.04);
+      border-radius: 6px;
+      color: var(--text-muted);
+      font-size: 0.88rem;
+      line-height: 1.55;
+    }
+
+    .note strong { color: var(--text); }
+
+    footer {
+      margin-top: 3rem;
+      padding-top: 1.5rem;
+      border-top: 1px solid var(--border);
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <a class="back-link" href="index.html">
+      <span aria-hidden="true">←</span> Back to hub
+    </a>
+
+    <span class="eyebrow">Pix2Surf · Dissertation Prototype</span>
+    <h1>AR Virtual Try-On Prototype</h1>
+    <p class="lede">
+      A real-time webcam AR try-on built for this dissertation. A 3D garment is generated
+      from a pair of front/back images and fitted to a pose-tracked body, then composited
+      over the live camera feed.
+    </p>
+
+    <section class="launch-card">
+      <div class="launch-head">
+        <h2>Launch the prototype</h2>
+        <span class="badge">3D · AR</span>
+      </div>
+      <p>
+        The prototype is a bundled Vite app served from <code>dist/apps/ar-tryon/</code>.
+        It requires camera access, so it must be opened over <code>localhost</code> or
+        HTTPS. Make sure you've run <code>npm run build</code> at least once, or start
+        <code>npm run dev</code> and use the dev link below.
+      </p>
+      <div class="btn-row">
+        <a class="btn" href="dist/apps/ar-tryon/index.html">
+          Launch Prototype
+          <span aria-hidden="true">→</span>
+        </a>
+        <a class="btn ghost" href="http://localhost:5173/apps/ar-tryon/">
+          Open in Vite Dev
+          <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </section>
+
+    <section class="launch-card" id="sam3-tryon" style="border-color: rgba(0, 245, 212, 0.25)">
+      <div class="launch-head">
+        <h2>SAM3 generated model</h2>
+        <span class="badge">SAM3 · GLB</span>
+      </div>
+      <p>
+        This garment is bundled as <code>shirt_canonical.glb</code> (segmentation / mesh from SAM3). Use either
+        launch button below: the app loads the model from the link, then tap <strong>Start Camera</strong> in the
+        controls panel to see it on your body.
+      </p>
+      <div class="btn-row">
+        <a class="btn" href="dist/apps/ar-tryon/index.html?glb=/sam3/shirt_canonical.glb">
+          Launch with SAM3 model
+          <span aria-hidden="true">→</span>
+        </a>
+        <a class="btn ghost" href="http://localhost:5173/apps/ar-tryon/?glb=/sam3/shirt_canonical.glb">
+          Open in Vite Dev
+          <span aria-hidden="true">↗</span>
+        </a>
+      </div>
+    </section>
+
+    <h2 class="section-title">How it works</h2>
+    <div class="info-grid">
+      <div class="info-card">
+        <h3>1. Capture</h3>
+        <p>Front &amp; back garment photos are uploaded and preprocessed into a 3D-ready pair.</p>
+      </div>
+      <div class="info-card">
+        <h3>2. Generate</h3>
+        <p>A pose-ready GLB is produced server-side, then delivered to the browser.</p>
+      </div>
+      <div class="info-card">
+        <h3>3. Try On</h3>
+        <p>The garment is rigged to a pose-tracked body and rendered over the webcam feed.</p>
+      </div>
+    </div>
+
+    <div class="note">
+      <strong>Mobile tip:</strong> open the dev server URL on a phone on the same Wi-Fi
+      (e.g. <code>https://&lt;your-LAN-IP&gt;:5173/apps/ar-tryon/</code>) and allow the
+      self-signed certificate to enable camera access on iOS Safari and Android Chrome.
+    </div>
+
+    <footer>
+      Pix2Surf · MCAST Level 6 Dissertation
+    </footer>
+  </main>
+</body>
+</html>

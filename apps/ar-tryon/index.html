@@ -2,8 +2,13 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=5"
+    />
     <title>AR Virtual Try-On — Prototype</title>
+    <!-- Vite transforms this entry. For python server-local.py use /dist/apps/ar-tryon/ (see server redirect). -->
+    <link rel="stylesheet" href="/src/apps/ar-tryon/ar-tryon.css" />
     <script type="module" src="/src/apps/ar-tryon/main.ts"></script>
   </head>
   <body>
@@ -17,11 +22,8 @@
     <div class="app-container">
       <header>
         <div class="logo">AR TRY-ON</div>
-        <nav class="header-nav">
-          <a href="/index.html">Home</a>
-          <a href="/pages/pipeline-dashboard.html">Pipeline</a>
-          <a href="/pages/splat-viewer.html">3DGS</a>
-          <a href="/pages/hunyuan-studio.html">Hunyuan</a>
+        <nav class="header-nav" aria-label="Hub navigation">
+          <a href="/index.html">← Back to hub</a>
         </nav>
         <div class="status-indicator">
           <div class="status-dot" id="status-dot"></div>
@@ -30,7 +32,7 @@
       </header>
 
       <div class="viewport-container">
-        <video id="webcam-video" autoplay playsinline></video>
+        <video id="webcam-video" autoplay playsinline muted webkit-playsinline></video>
         <canvas id="three-canvas"></canvas>
         <canvas id="debug-canvas"></canvas>
 
@@ -47,31 +49,64 @@
         </div>
       </div>
 
+      <button class="mobile-controls-toggle" id="mobile-controls-toggle" type="button" aria-expanded="false">
+        Show controls
+      </button>
+
+      <a class="mobile-hub-btn" href="/index.html">← Hub</a>
+
       <div class="side-panel">
+        <div class="side-panel-header">
+          <h3>Controls</h3>
+          <div class="side-panel-actions">
+            <a class="mini-btn" href="/index.html">Hub</a>
+            <button class="mini-btn" id="mobile-controls-close" type="button">Close</button>
+          </div>
+        </div>
+
         <div class="panel-section">
           <h3>Generate Garment</h3>
+          <p class="gen-hint">
+            <strong>Photos:</strong> flat-lay (not on a hanger), full shirt including sleeves, even lighting, plain
+            background (white or light grey). <strong>Front</strong> = chest/logos/collar opening visible;
+            <strong>back</strong> = rear view (tags/crests). Cream/white kits work best with good contrast vs the
+            backdrop. The 3D mesh is a generic T-shirt — polo collars and plackets will not match geometry exactly;
+            textures and prints should still appear.
+          </p>
           <div class="gen-image-row">
             <div class="gen-image-slot">
-              <label>Front</label>
-              <div class="slot-btn" id="gen-front-btn">
-                <span id="gen-front-label">+ Front</span>
+              <span class="gen-slot-field-label">Front</span>
+              <label class="slot-btn">
+                <input
+                  type="file"
+                  id="gen-front-input"
+                  class="gen-file-input"
+                  accept="image/*,.heic,.heif"
+                  aria-label="Choose front garment photo"
+                />
+                <span id="gen-front-label" class="gen-slot-placeholder">Tap to add photo</span>
                 <img id="gen-front-preview" class="hidden" alt="" />
-              </div>
-              <input type="file" id="gen-front-input" accept="image/*" />
+              </label>
             </div>
             <div class="gen-image-slot">
-              <label>Back</label>
-              <div class="slot-btn" id="gen-back-btn">
-                <span id="gen-back-label">+ Back</span>
+              <span class="gen-slot-field-label">Back</span>
+              <label class="slot-btn">
+                <input
+                  type="file"
+                  id="gen-back-input"
+                  class="gen-file-input"
+                  accept="image/*,.heic,.heif"
+                  aria-label="Choose back garment photo"
+                />
+                <span id="gen-back-label" class="gen-slot-placeholder">Tap to add photo</span>
                 <img id="gen-back-preview" class="hidden" alt="" />
-              </div>
-              <input type="file" id="gen-back-input" accept="image/*" />
+              </label>
             </div>
           </div>
           <button class="action-btn primary" id="gen-generate-btn" disabled>Generate Garment</button>
           <div class="gen-status" id="gen-status"></div>
           <button
-            class="action-btn secondary mt-2 py-2 text-[0.65rem]"
+            class="action-btn secondary action-btn--compact"
             id="gen-retry-btn"
             style="display: none"
           >
@@ -80,8 +115,29 @@
         </div>
 
         <div class="panel-section">
+          <h3>Quick Generation</h3>
+          <p class="gen-hint">
+            Use the built-in Manchester United reference photos to generate a sample garment instantly, without
+            uploading your own images.
+          </p>
+          <div class="quick-gen-row">
+            <div class="quick-gen-card">
+              <span>Front</span>
+              <img src="/quick-generation/mu-front.png" alt="Quick generation front shirt photo" />
+            </div>
+            <div class="quick-gen-card">
+              <span>Back</span>
+              <img src="/quick-generation/mu-back.png" alt="Quick generation back shirt photo" />
+            </div>
+          </div>
+          <button class="action-btn secondary" id="gen-quick-mu-btn" type="button">
+            Use These 2 Photos
+          </button>
+        </div>
+
+        <div class="panel-section">
           <h3>Garment</h3>
-          <div class="file-upload-zone" id="upload-zone">
+          <label class="file-upload-zone" id="upload-zone">
             <svg class="upload-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor">
               <path
                 d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4M17 8l-5-5-5 5M12 3v12"
@@ -90,17 +146,32 @@
                 stroke-linejoin="round"
               />
             </svg>
-            <p>Drop <span class="highlight">GLB model</span> here<br />or click to browse</p>
-            <input type="file" id="file-input" accept=".glb,.gltf" />
-          </div>
+            <p>Drop <span class="highlight">GLB model</span> here<br />or tap to browse</p>
+            <input type="file" id="file-input" class="tryon-zone-file-input" accept=".glb,.gltf" />
+          </label>
           <div class="info-box hidden" id="garment-info"></div>
-          <div class="slider-row mt-2">
-            <label class="min-w-[4.5rem]">Library</label>
+          <div class="info-box hidden" id="generated-garment-card">
+            <div style="display:flex; justify-content:space-between; align-items:center; gap:10px;">
+              <strong>Generated garment ready</strong>
+              <span id="generated-garment-status" style="opacity:0.8; font-size:12px;"></span>
+            </div>
+            <div style="display:flex; gap:10px; flex-wrap:wrap; margin-top:10px;">
+              <a class="mini-btn" id="generated-glb-link" href="#" target="_blank" rel="noreferrer">Open GLB</a>
+              <a class="mini-btn" id="generated-json-link" href="#" target="_blank" rel="noreferrer">Open JSON</a>
+              <button class="mini-btn" type="button" id="btn-use-generated-garment">Use in try-on</button>
+              <button class="mini-btn" type="button" id="btn-dismiss-generated-garment">Dismiss</button>
+            </div>
+            <div style="margin-top:10px; opacity:0.85; font-size:12px;">
+              Tip: you can keep adjusting controls while generation runs, then apply when ready.
+            </div>
+          </div>
+          <div class="slider-row slider-row--mt">
+            <label class="label--lib">Library</label>
             <select id="garment-library-select" class="tryon-select">
               <option value="">— Load list —</option>
             </select>
           </div>
-          <div class="debug-row mt-1.5">
+          <div class="debug-row debug-row--mt">
             <button class="mini-btn" type="button" id="btn-refresh-garments">Refresh</button>
             <button class="mini-btn" type="button" id="btn-load-library-glb">Load GLB</button>
           </div>
@@ -114,6 +185,18 @@
             logic as the old calibrate step, but smoothed over time. Side view temporarily holds the last good scale so
             width does not jitter.
           </div>
+          <div class="slider-group slider-row--mt">
+            <div class="slider-row">
+              <label>Auto size trim</label>
+              <input type="range" id="auto-scale-trim-slider" min="0.70" max="1.05" step="0.01" value="0.92" />
+              <span id="auto-scale-trim-value">0.92</span>
+            </div>
+            <div class="slider-row">
+              <label>Shoulder squeeze (X)</label>
+              <input type="range" id="shoulder-squeeze-slider" min="0.75" max="1.05" step="0.01" value="0.94" />
+              <span id="shoulder-squeeze-value">0.94</span>
+            </div>
+          </div>
         </div>
 
         <div class="panel-section">
@@ -121,13 +204,18 @@
           <div class="slider-group">
             <div class="slider-row">
               <label>Offset Y</label>
-              <input type="range" id="offset-y-slider" min="-0.3" max="0.3" step="0.01" value="0.05" />
-              <span id="offset-y-value">0.02</span>
+              <input type="range" id="offset-y-slider" min="-0.3" max="0.3" step="0.01" value="-0.15" />
+              <span id="offset-y-value">-0.15</span>
             </div>
             <div class="slider-row">
               <label>Offset X</label>
               <input type="range" id="offset-x-slider" min="-0.3" max="0.3" step="0.01" value="0" />
               <span id="offset-x-value">0.00</span>
+            </div>
+            <div class="slider-row">
+              <label>Auto shoulder drop</label>
+              <input type="range" id="shoulder-drop-slider" min="0" max="0.18" step="0.005" value="0.075" />
+              <span id="shoulder-drop-value">0.075</span>
             </div>
           </div>
         </div>
@@ -174,7 +262,7 @@
 
         <div class="panel-section">
           <h3>Animation</h3>
-          <div class="slider-group mt-2">
+          <div class="slider-group slider-group--mt">
             <div class="slider-row">
               <label>Smoothing</label>
               <input type="range" id="smoothing-slider" min="0.2" max="0.8" step="0.05" value="0.4" />
@@ -201,8 +289,8 @@
             <label>Log session (evaluation)</label>
             <div class="toggle-btn" id="toggle-session-log"></div>
           </div>
-          <div class="slider-row mt-1.5">
-            <label class="text-[9px]">Participant code (optional)</label>
+          <div class="slider-row slider-row--mt-md">
+            <label class="label--tiny">Participant code (optional)</label>
             <input
               type="text"
               id="session-participant-code"
@@ -212,26 +300,21 @@
               class="tryon-input-sm"
             />
           </div>
-          <div class="toggle-row mt-1.5">
+          <div class="toggle-row toggle-row--mt">
             <label>Log pose landmarks (throttled)</label>
             <div class="toggle-btn" id="toggle-log-landmarks"></div>
           </div>
-          <div class="slider-row mt-1">
-            <label class="text-[9px]">Landmark sample every</label>
-            <select id="log-landmark-interval" class="tryon-select text-[10px]">
+          <div class="slider-row slider-row--mt">
+            <label class="label--tiny">Landmark sample every</label>
+            <select id="log-landmark-interval" class="tryon-select tryon-select--sm">
               <option value="1000">1 s</option>
               <option value="2000" selected>2 s</option>
               <option value="5000">5 s</option>
             </select>
           </div>
-          <p class="mt-1.5 text-[8px] leading-snug text-tryon-muted">
+          <p class="session-note">
             Logs include FPS, latency, optional MediaPipe-style landmarks (no video), and simple alignment/jitter
-            proxies. Use only with consent — see
-            <a href="/pages/research-notice.html" target="_blank" rel="noopener" class="text-tryon-cyan">research notice</a>.
-            Post-task:
-            <a href="/pages/research-questionnaire.html" target="_blank" rel="noopener" class="text-tryon-cyan"
-              >questionnaire</a
-            >.
+            proxies. All stays on-device; use the Download button below to export a JSON file.
           </p>
           <div class="debug-row">
             <button class="mini-btn" id="btn-copy-settings">Copy Settings</button>
@@ -251,9 +334,9 @@
               <div class="stat-label">Latency</div>
             </div>
           </div>
-          <div class="slider-row mt-2">
+          <div class="slider-row slider-row--mt">
             <label>Pose every Nth frame</label>
-            <select id="pose-detect-interval" class="tryon-select text-[10px]">
+            <select id="pose-detect-interval" class="tryon-select tryon-select--sm">
               <option value="1">1 (max accuracy)</option>
               <option value="2" selected>2 (balanced)</option>
               <option value="3">3 (fastest)</option>
@@ -268,8 +351,6 @@
       <footer>
         <span>AR Try-On prototype</span>
         <div class="footer-links">
-          <a href="/pages/research-notice.html" target="_blank" rel="noopener">Research</a>
-          <a href="/pages/research-questionnaire.html" target="_blank" rel="noopener">Questionnaire</a>
           <a href="#" id="reset-link">Reset All</a>
         </div>
       </footer>

@@ -31,6 +31,7 @@ export function drawHudOverlay(
   line(`Confidence: ${(conf * 100).toFixed(0)}%`);
   line(`Garment: ${debugInfo.garmentHidden ? 'HIDDEN (pose)' : 'ON'}`);
   line(`View: ${String(debugInfo.viewAngle)}`);
+  if (debugInfo.occlusionAssist) line('Occlusion assist: ON');
   let facing = debugInfo.facingAway ? 'BACK' : 'FRONT';
   if (debugInfo.viewAngle === 'SIDE') facing = 'PROFILE';
   line(`Facing: ${facing}`);
@@ -44,6 +45,8 @@ export function drawHudOverlay(
   line(`Shoulder Width: ${(debugInfo.shoulderWidth as number).toFixed(4)}`);
   line(`Torso Height: ${(debugInfo.torsoHeight as number).toFixed(4)}`);
   line(`Effective Width: ${(debugInfo.effectiveWidth as number).toFixed(4)}`);
+  const drop = (debugInfo.shoulderDropWorld as number) || 0;
+  line(`Auto shoulder drop: ${drop.toFixed(4)}`);
   line('─────────────────────────────');
   line(`Garment Shoulders: ${garmentShoulderWidth?.toFixed(4) || 'N/A'}`);
   const fb = debugInfo.fitStructuralMul as number | null;

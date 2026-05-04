@@ -1,4 +1,3 @@
-import './ar-tryon.css';
 import { ARTryOn } from './ar-tryon-app';
 
 declare global {
@@ -8,5 +7,6 @@ declare global {
 }
 
 window.addEventListener('load', () => {
-  window.app = new ARTryOn();
+  const app = new ARTryOn();
+  window.app = app;
 });

@@ -16,6 +16,7 @@ The project is deliberately scoped to **one app**: the browser AR try-on. The Py
 - [Goals](#goals)
 - [How it fits together](#how-it-fits-together)
   - [Live path (`POST /api/generate`)](#live-path-post-apigenerate)
+  - [Garment-texture quality features](#garment-texture-quality-features)
   - [The one front-end app](#the-one-front-end-app)
 - [Prerequisites](#prerequisites)
 - [Quick start](#quick-start)
@@ -46,15 +47,28 @@ The project is deliberately scoped to **one app**: the browser AR try-on. The Py
 When you run `python server-local.py` and upload front/back photos from the AR try-on panel, the server will:
 
 1. Save uploads under `generated/task_<id>/`.
-2. Run **`pipeline/garment_preprocess.py`** (`rembg` → OpenCV GrabCut → passthrough) and write `garment_preprocess.json` plus a companion **alpha-mask PNG** (`<name>.mask.png`) next to each processed image.
+2. Run **`pipeline/garment_preprocess.py`** (`rembg` → OpenCV GrabCut → passthrough) and write `garment_preprocess.json` plus a companion **alpha-mask PNG** (`<name>.mask.png`) next to each processed image. The mask is the true garment silhouette and is reused downstream so the texture never bakes in a white/black backdrop.
 3. Run **`tshirt_to_glb_pose_ready.py`**: body-anchored tile placement → Pix2Surf / direct / hybrid texture → SMPL skinning → Blender export → **`garment.glb`** + **`garment.json`**.
 4. The **AR try-on** front-end loads that GLB and animates it with pose from the device camera.
 
 Implementation details: [`pipeline/ARCHITECTURE.md`](pipeline/ARCHITECTURE.md).
 
+### Garment-texture quality features
+
+- **Backdrop-free textures.** The rembg/GrabCut alpha mask is carried through resize/crop/upscale steps and used as ground-truth foreground so the texture does not bake in a studio background.
+- **Body-anchored front/back placement.** Landmarks from the mask anchor both tiles to the same body coordinate system so front/back prints align at matching body heights. Configurable via `TILE_SHOULDER_FRAC` / `TILE_HEM_FRAC` in `.env`.
+
 ### The one front-end app
 
 - [`apps/ar-tryon/`](apps/ar-tryon/) — **Vite + TypeScript + vanilla CSS** AR try-on. Build with `npm run build`; the Python server then serves it at `/dist/apps/ar-tryon/index.html` and redirects `/` to that page. During development run `npm run dev` for Vite's HTTPS dev server (needed on phones so `getUserMedia` works over a LAN IP).
+
+Mobile UX niceties baked in:
+
+- Full-screen camera viewport on phones/tablets.
+- Collapsible controls drawer with a floating **Show controls** button.
+- Debug HUD disabled by default on mobile.
+- Built-in **Quick Generation** using two Manchester United reference photos.
+- **Session-logging** panel — record FPS/latency (locally) for evaluation.
 
 ---
 
@@ -76,8 +90,6 @@ npm install
 npm run build
 ```
 
-This writes `dist/apps/ar-tryon/index.html` (plus the bundled JS/CSS) — that is the only page this project exposes.
-
 ### 2. Start the local server
 
 ```bash
@@ -85,7 +97,7 @@ pip install -r requirements-pipeline.txt
 python server-local.py
 ```
 
-Open **`http://localhost:8000/`** (or the port set in `.env`). The server redirects `/` straight to the built try-on — no hub, no other pages. For phones on the same Wi‑Fi, use the **LAN URL** printed at startup. Camera access may require **HTTPS**; see [`docs/TUNNELS.md`](docs/TUNNELS.md).
+Open **`http://localhost:8000/`** (or the port set in `.env`). For phones on the same Wi‑Fi, use the **LAN URL** printed at startup. Camera access may require **HTTPS**; see [`docs/TUNNELS.md`](docs/TUNNELS.md).
 
 ### 3. Develop the try-on with live reload (optional)
 
@@ -93,7 +105,7 @@ Open **`http://localhost:8000/`** (or the port set in `.env`). The server redire
 npm run dev
 ```
 
-Vite serves the TypeScript source over HTTPS at `https://<LAN-IP>:5173/apps/ar-tryon/` and proxies `/api/*` and `/generated/*` to the Python server on port 8000. Keep `python server-local.py` running in parallel so `/api/generate` still works.
+Vite serves the TypeScript source over HTTPS at `https://<LAN-IP>:5173/apps/ar-tryon/` and proxies `/api/*` and `/generated/*` to the Python server on port 8000.
 
 #### Which URL should I open?
 
@@ -106,7 +118,23 @@ Vite serves the TypeScript source over HTTPS at `https://<LAN-IP>:5173/apps/ar-t
 
 ## Configuration (`.env`)
 
-Create a **`.env`** file next to `server-local.py`. It is **gitignored** — do not commit secrets. The full list of keys lives in `CONFIG` inside [`server-local.py`](server-local.py); the most common ones are documented in the README table in this repo.
+Create a **`.env`** file next to `server-local.py`. It is **gitignored** — do not commit secrets. The full list of keys lives in `CONFIG` inside [`server-local.py`](server-local.py); the most common ones:
+
+| Variable | Role |
+|----------|------|
+| `PORT` | HTTP port (default `8000`). |
+| `PIX2SURF_ROOT` | Path to Pix2Surf repo. |
+| `SMPL_PKL` | SMPL neutral model pickle. |
+| `GARMENT_OBJ` | Fixed shirt OBJ (default `shirts.obj`). |
+| `BLENDER_BIN` | Blender executable. |
+| `OUTPUT_DIR` | Where `generated/task_*` folders are written (default `./generated`). |
+| `DEVICE` | `cpu` / `cuda` for Pix2Surf inference. |
+| `GEN_TIMEOUT_SEC`, `SUBDIVIDE_ITERS`, `SMOOTH_ITERS`, `PREP_MIN_EDGE` | Speed/quality tuning for generation. |
+| `TEXTURE_MODE` | `direct` / `hybrid` / `pix2surf`. |
+| `TILE_ALIGN_TEMPLATE` | `1` enables body-anchored tile placement; `0` uses legacy bbox-centering. |
+| `TILE_SHOULDER_FRAC`, `TILE_HEM_FRAC` | Tile-Y fractions for shoulder/hem alignment. |
+| `HTTPS_CERT`, `HTTPS_KEY` | Optional TLS for the Python server for mobile camera access on LAN. |
+| `TRYON_VITE_PORT` | Vite dev port (default `5173`). |
 
 Use `.env.example` as a starting point.
 
@@ -114,58 +142,53 @@ Use `.env.example` as a starting point.
 
 ## HTTP API
 
-All endpoints live on the Python server (`server-local.py`). The AR try-on is the only client that calls them.
-
 | Route | Purpose |
 |-------|---------|
-| `GET /` | 302 → `/dist/apps/ar-tryon/index.html` (the single page). |
-| `GET /api/health` | Liveness ping used by the try-on's status dot. |
-| `GET /api/config` | Reports whether Pix2Surf, SMPL, Blender and the garment script are all reachable. |
-| `GET /api/server-info` | LAN URLs, scheme, Vite port, and camera/HTTPS hints for QR codes / bookmarks. |
-| `GET /api/garments` | Library of previously generated GLBs under `OUTPUT_DIR`. |
-| `POST /api/generate` | Queue a GLB generation job from two uploaded photos. |
-| `GET /api/status/<task_id>` | Poll a generation task. |
-| `GET /generated/<task>/…` | Static access to a task's outputs (GLB, JSON, processed images). |
-
-Exact payloads and behaviour are implemented in `server-local.py`.
+| `GET /` | 302 → `/dist/apps/ar-tryon/index.html` |
+| `GET /api/health` | Liveness ping |
+| `GET /api/config` | Dependency/config checks |
+| `GET /api/server-info` | LAN URLs + camera/HTTPS hints |
+| `GET /api/garments` | Library of generated GLBs |
+| `POST /api/generate` | Run generation from two photos |
+| `GET /api/status/<task_id>` | Poll a job |
+| `GET /generated/<task>/…` | Static outputs |
 
 ---
 
 ## Repository layout
 
 ```
-apps/ar-tryon/                # Vite + TS AR try-on (the only front-end app)
+apps/ar-tryon/                # Vite + TS AR try-on
 src/apps/ar-tryon/            # TypeScript sources for the try-on
 public/quick-generation/      # Reference photos for "Quick Generation"
 public/sam3/                  # Canonical shirt GLB reference
-pipeline/                     # Python preprocess + offline research helpers
-docs/                         # Mobile/TLS tunnels + notes
+dist/apps/ar-tryon/           # Built output served by server-local.py (gitignored)
+pipeline/                     # Python preprocess + helpers
+docs/                         # Tunnels + notes
 server-local.py               # Static file server + /api/generate
 tshirt_to_glb_pose_ready.py   # Pix2Surf → SMPL → Blender → GLB
-index.html                    # Minimal redirect to the built try-on
-package.json                  # npm scripts (dev, build, preview)
+index.html                    # Redirect to built try-on
+package.json                  # npm scripts
 ```
-
-**`generated/`** holds per-task outputs (images, GLB, JSON). It is listed in **`.gitignore`** to avoid committing large binaries.
 
 ---
 
 ## What is *not* committed to git
 
-- `node_modules/` (installed dependencies)
-- `dist/` (build output; rebuild with `npm run build`)
-- `.env` (local paths and secrets; use `.env.example` as a template)
-- `generated/` (GLBs, intermediate images, per-run artifacts)
+- `node_modules/`
+- `dist/`
+- `.env`
+- `generated/`
 
 ---
 
 ## Known limitations (honest scope)
 
-- **Template topology only** — every GLB shares the same shirt mesh, so irregular necklines / open-fronts won’t match geometry exactly; textures and prints still appear.
-- **Phone HTTPS** — `getUserMedia` over a LAN IP often requires HTTPS; see [`docs/TUNNELS.md`](docs/TUNNELS.md).
+- **Template topology only** — every GLB shares the same shirt mesh, so irregular necklines / open-fronts won’t match geometry exactly.
+- **Phone HTTPS** — `getUserMedia` over LAN often requires HTTPS (Vite HTTPS dev server, `HTTPS_CERT`/`HTTPS_KEY`, or a tunnel).
 
 ---
 
 ## License and academic use
 
-This repository supports a **Level 6 dissertation** (Pix2Surf / virtual try-on). Third-party components (Pix2Surf, SMPL, Three.js, MediaPipe, etc.) remain under **their respective licenses**.
+This repository supports a **Level 6 dissertation** (Pix2Surf / virtual try-on). Third-party components remain under **their respective licenses**; cite them in your thesis as required.
