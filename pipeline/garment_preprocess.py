@@ -80,6 +80,49 @@ def _write_mask_sidecar(dst_image: Path, alpha: np.ndarray, *, binarize_thresh: 
     return mask_path
 
 
+def _defringe_alpha_matte(rgba: np.ndarray, alpha: np.ndarray) -> np.ndarray:
+    """
+    Replace rembg halos on dark garments with the median garment colour.
+
+    Fringe pixels that look like backdrop bleed are repainted instead of punched
+    out of the mask so the flat-lay silhouette stays solid (no clear lines
+    between torso and sleeves after UV warp).
+    """
+    try:
+        import cv2
+    except ImportError:
+        return alpha
+
+    a = np.asarray(alpha, dtype=np.uint8)
+    if not np.any(a > 16):
+        return a
+
+    rgb = np.asarray(rgba[:, :, :3], dtype=np.int32)
+    fg = a > 16
+    rgb_fg = rgb[fg]
+    if rgb_fg.size == 0:
+        return a
+
+    dom_lum = int(np.median(rgb_fg.astype(np.int32).sum(axis=1)))
+    # Only defringe when the garment body is clearly darker than the studio backdrop.
+    if dom_lum >= 520:
+        return a
+
+    near_white = (rgb[..., 0] >= 236) & (rgb[..., 1] >= 236) & (rgb[..., 2] >= 236)
+    bright = rgb.sum(axis=-1) > 690
+    fg_u8 = (fg.astype(np.uint8) * 255)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    eroded = cv2.erode(fg_u8, k, iterations=1) > 0
+    fringe = fg & ~eroded
+    repaint = fringe & (near_white | bright)
+    if not np.any(repaint):
+        return a
+
+    dom = np.median(rgb_fg, axis=0).astype(np.uint8)
+    rgba[repaint, :3] = dom
+    return a
+
+
 def _repair_alpha_holes(alpha: np.ndarray, *, kernel: int, iterations: int) -> np.ndarray:
     """
     Close small gaps inside the garment mask (common on cream/white fabric with rembg).
@@ -140,9 +183,11 @@ def preprocess_garment_product_shot(src_path: Path, dst_path: Path) -> dict[str,
             rk = int(os.environ.get("GARMENT_PREPROCESS_ALPHA_CLOSE_KERNEL", "5") or "5")
             ri = int(os.environ.get("GARMENT_PREPROCESS_ALPHA_CLOSE_ITERS", "2") or "2")
             alpha = _repair_alpha_holes(alpha, kernel=rk, iterations=ri)
-            meta["fg_bbox"] = _bbox_from_mask(alpha)
             rgba = np.array(result)
             rgba[:, :, 3] = alpha
+            alpha = _defringe_alpha_matte(rgba, alpha)
+            rgba[:, :, 3] = alpha
+            meta["fg_bbox"] = _bbox_from_mask(alpha)
             result = Image.fromarray(rgba, mode="RGBA")
             white = Image.new("RGBA", result.size, (255, 255, 255, 255))
             white.paste(result, mask=result.split()[3])

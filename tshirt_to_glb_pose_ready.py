@@ -654,7 +654,7 @@ def _stabilize_tile_background(tile_rgb: np.ndarray, fg_mask: np.ndarray) -> np.
             if np.any(holes_crop):
                 num, labels, stats, _ = cv2.connectedComponentsWithStats(holes_crop, 8)
                 small = np.zeros_like(holes_crop)
-                max_area = max(64, int(0.02 * (y1 - y0) * (x1 - x0)))
+                max_area = max(256, int(0.08 * (y1 - y0) * (x1 - x0)))
                 for i in range(1, num):
                     if int(stats[i, cv2.CC_STAT_AREA]) <= max_area:
                         small[labels == i] = 255
@@ -663,6 +663,239 @@ def _stabilize_tile_background(tile_rgb: np.ndarray, fg_mask: np.ndarray) -> np.
                     out_bgr = cv2.inpaint(out_bgr, small, 3, cv2.INPAINT_TELEA)
                     out = cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
     return out
+
+
+def _defringe_garment_tile(
+    tile_rgb: np.ndarray,
+    fg_mask: np.ndarray,
+    *,
+    edge_px: int = 12,
+    white_thresh: int = 228,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Remove backdrop halos still marked as garment after rembg / JPEG flattening.
+
+    Targets the outer ring of the silhouette (where fringe pixels live) and replaces
+    near-white samples with the dominant garment colour. The mask stays solid so
+    alpha clip never punches clear lines through the try-on overlay.
+    """
+    if not np.any(fg_mask):
+        return tile_rgb, fg_mask
+
+    out_rgb = tile_rgb.copy()
+    out_fg = fg_mask.copy()
+    dom = _dominant_garment_color(tile_rgb, fg_mask)
+    rgb_i = tile_rgb.astype(np.int32)
+    near_white = (
+        (rgb_i[..., 0] >= white_thresh)
+        & (rgb_i[..., 1] >= white_thresh)
+        & (rgb_i[..., 2] >= white_thresh)
+    )
+    dom_lum = int(dom.sum()) if dom is not None else 999
+    bright = rgb_i.sum(axis=-1) > 690 if dom_lum < 520 else np.zeros(fg_mask.shape, dtype=bool)
+
+    if cv2 is not None:
+        fg_u8 = (fg_mask.astype(np.uint8) * 255)
+        k = max(3, int(edge_px) | 1)
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        eroded = cv2.erode(fg_u8, kernel, iterations=1) > 0
+        fringe = fg_mask & ~eroded
+        bleed = fringe & (near_white | bright)
+    else:
+        bleed = fg_mask & near_white
+
+    if dom is not None and np.any(bleed):
+        out_rgb[bleed] = dom
+    return out_rgb, out_fg
+
+
+def _bridge_garment_mask_gaps(
+    tile_rgb: np.ndarray,
+    fg_mask: np.ndarray,
+    *,
+    close_kernel: Optional[int] = None,
+    close_iters: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Close gaps between torso and sleeves (common in rembg masks) and fill them
+    with the garment's dominant body colour so the 3D overlay looks continuous.
+    """
+    if cv2 is None or not np.any(fg_mask):
+        return tile_rgb, fg_mask
+
+    try:
+        k = int(
+            close_kernel
+            if close_kernel is not None
+            else (os.environ.get("GARMENT_MASK_BRIDGE_KERNEL", "35") or "35")
+        )
+        it = int(
+            close_iters
+            if close_iters is not None
+            else (os.environ.get("GARMENT_MASK_BRIDGE_ITERS", "2") or "2")
+        )
+    except ValueError:
+        k, it = 25, 2
+
+    if k <= 0 or it <= 0:
+        return tile_rgb, fg_mask
+
+    dom = _dominant_garment_color(tile_rgb, fg_mask)
+    if dom is None:
+        return tile_rgb, fg_mask
+
+    k = max(3, k | 1)
+    el = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    fg_u8 = (fg_mask.astype(np.uint8) * 255)
+    bridged = cv2.morphologyEx(fg_u8, cv2.MORPH_CLOSE, el, iterations=int(it))
+    bridged_bool = bridged >= 128
+    fill = bridged_bool & ~fg_mask
+    out_rgb = tile_rgb.copy()
+    out_fg = bridged_bool
+    if np.any(fill):
+        out_rgb[fill] = dom
+    return out_rgb, out_fg
+
+
+def _fill_row_span_gaps(tile_rgb: np.ndarray, fg_mask: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    Per row, fill every pixel between the leftmost and rightmost foreground sample
+    with the dominant garment colour (closes underarm / side gaps in the UV tile).
+    """
+    if not np.any(fg_mask):
+        return tile_rgb, fg_mask
+    dom = _dominant_garment_color(tile_rgb, fg_mask)
+    if dom is None:
+        return tile_rgb, fg_mask
+
+    h, w = fg_mask.shape
+    out_rgb = tile_rgb.copy()
+    out_fg = fg_mask.copy()
+    for y in range(h):
+        xs = np.where(out_fg[y])[0]
+        if xs.size == 0:
+            continue
+        lx, rx = int(xs.min()), int(xs.max())
+        span = slice(lx, rx + 1)
+        holes = ~out_fg[y, span]
+        if np.any(holes):
+            out_rgb[y, span][holes] = dom
+            out_fg[y, span] = True
+    return out_rgb, out_fg
+
+
+def _solidify_garment_silhouette(
+    tile_rgb: np.ndarray,
+    fg_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Fill the convex hull of the garment mask with the dominant body colour."""
+    v = os.environ.get("GARMENT_SOLIDIFY_SILHOUETTE", "1").strip().lower()
+    if v in ("0", "false", "no", "off") or cv2 is None or not np.any(fg_mask):
+        return tile_rgb, fg_mask
+
+    dom = _dominant_garment_color(tile_rgb, fg_mask)
+    if dom is None:
+        return tile_rgb, fg_mask
+
+    ys, xs = np.where(fg_mask)
+    pts = np.column_stack([xs, ys]).astype(np.int32)
+    if pts.shape[0] < 3:
+        return tile_rgb, fg_mask
+
+    hull = cv2.convexHull(pts)
+    hull_mask = np.zeros(fg_mask.shape, np.uint8)
+    cv2.fillConvexPoly(hull_mask, hull, 255)
+    solid = hull_mask > 0
+    fill = solid & ~fg_mask
+    out_rgb = tile_rgb.copy()
+    if np.any(fill):
+        out_rgb[fill] = dom
+    return out_rgb, solid
+
+
+def _expand_garment_coverage(
+    tile_rgb: np.ndarray,
+    fg_mask: np.ndarray,
+    *,
+    expand_px: Optional[int] = None,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Dilate the silhouette slightly so 3D mesh seam UVs still sample garment colour."""
+    if cv2 is None or not np.any(fg_mask):
+        return tile_rgb, fg_mask
+    try:
+        px = int(
+            expand_px
+            if expand_px is not None
+            else (os.environ.get("GARMENT_MASK_EXPAND_PX", "8") or "8")
+        )
+    except ValueError:
+        px = 5
+    if px <= 0:
+        return tile_rgb, fg_mask
+
+    dom = _dominant_garment_color(tile_rgb, fg_mask)
+    if dom is None:
+        return tile_rgb, fg_mask
+
+    k = max(3, (px * 2 + 1) | 1)
+    el = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+    fg_u8 = (fg_mask.astype(np.uint8) * 255)
+    dil = cv2.dilate(fg_u8, el, iterations=1)
+    dil_bool = dil >= 128
+    expand = dil_bool & ~fg_mask
+    out_rgb = tile_rgb.copy()
+    if np.any(expand):
+        out_rgb[expand] = dom
+    return out_rgb, dil_bool
+
+
+def _inpaint_bbox_holes(tile_rgb: np.ndarray, fg_mask: np.ndarray) -> np.ndarray:
+    """Inpaint every hole inside the garment bounding box (underarm / neck gaps)."""
+    if cv2 is None or not np.any(fg_mask):
+        return tile_rgb
+    ys, xs = np.where(fg_mask)
+    y0, y1 = int(ys.min()), int(ys.max()) + 1
+    x0, x1 = int(xs.min()), int(xs.max()) + 1
+    holes_full = (~fg_mask).astype(np.uint8) * 255
+    holes_crop = np.zeros_like(holes_full)
+    holes_crop[y0:y1, x0:x1] = holes_full[y0:y1, x0:x1]
+    if not np.any(holes_crop):
+        return tile_rgb
+    out_bgr = cv2.cvtColor(tile_rgb, cv2.COLOR_RGB2BGR)
+    out_bgr = cv2.inpaint(out_bgr, holes_crop, 5, cv2.INPAINT_TELEA)
+    return cv2.cvtColor(out_bgr, cv2.COLOR_BGR2RGB)
+
+
+def _finalize_garment_tile(
+    tile_rgb: np.ndarray,
+    fg_mask: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Defringe halos, bridge torso/sleeve gaps, keep UV samples garment-coloured."""
+    rgb, fg = _defringe_garment_tile(tile_rgb, fg_mask)
+    rgb, fg = _bridge_garment_mask_gaps(rgb, fg)
+    rgb, fg = _fill_row_span_gaps(rgb, fg)
+    rgb, fg = _solidify_garment_silhouette(rgb, fg)
+    rgb = _inpaint_bbox_holes(rgb, fg)
+    return _expand_garment_coverage(rgb, fg)
+
+
+def _seal_garment_atlas(atlas: np.ndarray, atlas_a: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Morph-close the atlas alpha and paint garment colour into any remaining holes."""
+    if cv2 is None or not np.any(atlas_a > 0):
+        return atlas, atlas_a
+    dom = _dominant_garment_color(atlas, atlas_a > 128)
+    if dom is None:
+        return atlas, atlas_a
+    fg_u8 = np.where(atlas_a > 48, 255, 0).astype(np.uint8)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (31, 31))
+    closed = cv2.morphologyEx(fg_u8, cv2.MORPH_CLOSE, k, iterations=2)
+    sealed = closed >= 128
+    fill = sealed & (atlas_a <= 48)
+    out_rgb = atlas.copy()
+    if np.any(fill):
+        out_rgb[fill] = dom
+    out_a = np.where(sealed, 255, 0).astype(np.uint8)
+    return out_rgb, out_a
 
 
 def _body_landmarks_from_mask(mask: np.ndarray) -> dict:
@@ -862,8 +1095,185 @@ def _use_texture_full_bleed() -> bool:
     return v not in ("0", "false", "no", "off")
 
 
+def _use_texture_warp_fill() -> bool:
+    """
+    When true, non-uniformly warp each garment photo so it fills the tile / model UV
+    (per-row horizontal stretch + vertical remap). Set GARMENT_TEXTURE_WARP_FILL=0 for
+    legacy uniform-scale cover/align only.
+    """
+    v = os.environ.get("GARMENT_TEXTURE_WARP_FILL", "1").strip().lower()
+    return v not in ("0", "false", "no", "off")
+
+
+def _per_row_x_extents(fg: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Left/right foreground x per image row; gaps filled by vertical interpolation."""
+    h = fg.shape[0]
+    x_l = np.full(h, np.nan, dtype=np.float64)
+    x_r = np.full(h, np.nan, dtype=np.float64)
+    for y in range(h):
+        xs = np.where(fg[y])[0]
+        if xs.size:
+            x_l[y] = float(xs.min())
+            x_r[y] = float(xs.max())
+    valid = np.isfinite(x_l)
+    if not np.any(valid):
+        return x_l, x_r
+    ys = np.where(valid)[0]
+    all_y = np.arange(h, dtype=np.float64)
+    x_l = np.interp(all_y, ys.astype(np.float64), x_l[ys])
+    x_r = np.interp(all_y, ys.astype(np.float64), x_r[ys])
+    return x_l, x_r
+
+
+def _interp_row_extent(yf: float, x_l: np.ndarray, x_r: np.ndarray) -> Tuple[float, float]:
+    yf = float(np.clip(yf, 0.0, len(x_l) - 1.001))
+    y0 = int(np.floor(yf))
+    y1 = min(int(np.ceil(yf)), len(x_l) - 1)
+    if y0 == y1:
+        return float(x_l[y0]), float(x_r[y0])
+    t = yf - y0
+    xl = (1.0 - t) * x_l[y0] + t * x_l[y1]
+    xr = (1.0 - t) * x_r[y0] + t * x_r[y1]
+    return float(xl), float(xr)
+
+
+def _warp_garment_to_fill_tile(
+    arr: np.ndarray,
+    fg: np.ndarray,
+    tw: int,
+    th: int,
+    *,
+    shoulder_y_frac: Optional[float] = None,
+    hem_y_frac: Optional[float] = None,
+    side_margin_frac: Optional[float] = None,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Non-uniform warp: stretch each garment row horizontally and remap vertically so
+    the user photo fills the front/back tile (matching the 3D model UV layout).
+
+    Shoulder and hem mass-percentiles anchor the vertical remap; sleeve rows widen
+    with the row's foreground span so prints reach the mesh sleeves.
+    """
+    if cv2 is None:
+        return None
+    fg = fg.astype(bool)
+    h_img, w_img = arr.shape[:2]
+    if int(fg.sum()) < 500:
+        return None
+
+    lm = _body_landmarks_from_mask(fg)
+    if not lm:
+        return None
+    y_sh = float(lm["y_shoulder"])
+    y_hem = float(lm["y_hem"])
+    if y_hem - y_sh < 8.0:
+        return None
+
+    full_bleed = _use_texture_full_bleed()
+    if shoulder_y_frac is None:
+        shoulder_y_frac = 0.0 if full_bleed else 0.12
+    if hem_y_frac is None:
+        hem_y_frac = 1.0 if full_bleed else 0.92
+    if side_margin_frac is None:
+        side_margin_frac = 0.02 if full_bleed else 0.06
+
+    fg_rows = np.where(np.any(fg, axis=1))[0]
+    if fg_rows.size == 0:
+        return None
+    y_src_top = float(fg_rows.min())
+    y_src_bot = float(fg_rows.max())
+    span_src = max(y_src_bot - y_src_top, 1e-6)
+
+    y_tgt_sh = float(shoulder_y_frac) * th
+    y_tgt_hem = float(hem_y_frac) * th
+    span_tgt = max(y_tgt_hem - y_tgt_sh, 1e-6)
+    x_tgt_l = float(side_margin_frac) * tw
+    x_tgt_r = (1.0 - float(side_margin_frac)) * tw
+    span_x_tgt = max(x_tgt_r - x_tgt_l, 1e-6)
+
+    x_l, x_r = _per_row_x_extents(fg)
+
+    yy, xx = np.mgrid[0:th, 0:tw].astype(np.float32)
+    # Vertical: map tile band [y_tgt_sh, y_tgt_hem] onto source [y_src_top, y_src_bot].
+    t_vert = (yy - y_tgt_sh) / span_tgt
+    y_src = y_src_top + t_vert * span_src
+    y_src = np.clip(y_src, 0.0, h_img - 1.001)
+
+    map_y = y_src.astype(np.float32)
+    map_x = np.zeros((th, tw), dtype=np.float32)
+    for y_out in range(th):
+        yf = float(y_src[y_out, 0])
+        xl, xr = _interp_row_extent(yf, x_l, x_r)
+        row_w = max(xr - xl, 1.0)
+        x_norm = (xx[y_out, :] - x_tgt_l) / span_x_tgt
+        map_x[y_out, :] = np.clip(xl + x_norm * row_w, 0.0, w_img - 1.001)
+
+    warped_rgb = cv2.remap(
+        arr,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    fg_u8 = (fg.astype(np.uint8) * 255)
+    warped_fg_u8 = cv2.remap(
+        fg_u8,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_CONSTANT,
+        borderValue=0,
+    )
+    warped_fg = warped_fg_u8 >= 128
+    return warped_rgb, warped_fg
+
+
+def _try_warp_tile_from_path(
+    path: Path,
+    tw: int,
+    th: int,
+    thresh: int = 238,
+    *,
+    shoulder_y_frac: Optional[float] = None,
+    hem_y_frac: Optional[float] = None,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """Load a garment photo and warp it to fill the tile, or None if warp is skipped/fails."""
+    if not _use_texture_warp_fill():
+        return None
+    img = Image.open(path).convert("RGB")
+    arr = np.asarray(img)
+    hint = _load_sidecar_mask(path)
+    fg = _foreground_mask_product_shot(arr, white_thresh=thresh, mask_hint=hint)
+    warped = _warp_garment_to_fill_tile(
+        arr,
+        fg,
+        tw,
+        th,
+        shoulder_y_frac=shoulder_y_frac,
+        hem_y_frac=hem_y_frac,
+    )
+    if warped is None:
+        return None
+    rgb_canvas, fg_canvas = warped
+    full_bleed = _use_texture_full_bleed()
+    sh = shoulder_y_frac if shoulder_y_frac is not None else (0.0 if full_bleed else 0.12)
+    hem = hem_y_frac if hem_y_frac is not None else (1.0 if full_bleed else 0.92)
+    print(
+        f"  [tile-warp] {path.name}: fill tile {tw}x{th}, "
+        f"shoulder→{sh:.2f}·th, hem→{hem:.2f}·th, "
+        f"fg={int(fg_canvas.sum())}/{th * tw}",
+        flush=True,
+    )
+    filled = _stabilize_tile_background(rgb_canvas, fg_canvas) if np.any(fg_canvas) else rgb_canvas
+    return _finalize_garment_tile(filled, fg_canvas)
+
+
 def _crop_tile_cover_texture(path: Path, tw: int, th: int, thresh: int = 238) -> Tuple[np.ndarray, np.ndarray]:
-    """Place the garment photo so it covers the entire tile (object-fit: cover)."""
+    """Place the garment photo so it covers the entire tile (warp-fill or object-fit: cover)."""
+    warped = _try_warp_tile_from_path(path, tw, th, thresh=thresh)
+    if warped is not None:
+        return warped
+
     img = Image.open(path).convert("RGB")
     arr = np.asarray(img)
     hint = _load_sidecar_mask(path)
@@ -912,7 +1322,7 @@ def _crop_tile_cover_texture(path: Path, tw: int, th: int, thresh: int = 238) ->
 
     print(f"  [tile-cover] {path.name}: full-bleed {tw}x{th}, fg={int(fg_canvas.sum())}/{th * tw}", flush=True)
     filled = _stabilize_tile_background(canvas, fg_canvas) if np.any(fg_canvas) else canvas
-    return filled, fg_canvas
+    return _finalize_garment_tile(filled, fg_canvas)
 
 
 def _crop_tile_for_texture(path: Path, tw: int, th: int, thresh: int = 238) -> Tuple[np.ndarray, np.ndarray]:
@@ -951,29 +1361,41 @@ def _crop_tile_for_texture(path: Path, tw: int, th: int, thresh: int = 238) -> T
             hem_y = float(os.environ.get("GARMENT_TILE_HEM_FRAC", "0.92") or "0.92")
         except ValueError:
             hem_y = 0.92
-        aligned = _align_garment_to_tile(
-            arr, fg, tw, th,
-            shoulder_y_frac=sh_y,
-            hem_y_frac=hem_y,
-            garment_fill_frac=fill_f,
-            mode=mode,
-        )
+        warped = _warp_garment_to_fill_tile(
+            arr, fg, tw, th, shoulder_y_frac=sh_y, hem_y_frac=hem_y,
+        ) if _use_texture_warp_fill() else None
+        aligned = warped
+        if aligned is None:
+            aligned = _align_garment_to_tile(
+                arr, fg, tw, th,
+                shoulder_y_frac=sh_y,
+                hem_y_frac=hem_y,
+                garment_fill_frac=fill_f,
+                mode=mode,
+            )
         if aligned is not None:
             rgb_canvas, fg_canvas = aligned
-            if mode == "shoulder":
+            if warped is not None:
+                desc = (
+                    f"warp-fill shoulder→{sh_y:.2f}·th, hem→{hem_y:.2f}·th"
+                )
+                tag = "tile-warp"
+            elif mode == "shoulder":
                 desc = (
                     f"shoulder→{sh_y:.2f}·th, hem→{hem_y:.2f}·th, x→tile-centre, "
                     f"fill={fill_f:.2f}"
                 )
+                tag = "tile-align"
             else:
                 desc = f"image-centre→tile-centre, fill={fill_f:.2f}"
+                tag = "tile-align"
             print(
-                f"  [tile-align] {path.name}: {desc}, "
+                f"  [{tag}] {path.name}: {desc}, "
                 f"fg={int(fg_canvas.sum())}/{th * tw}",
                 flush=True,
             )
             filled = _stabilize_tile_background(rgb_canvas, fg_canvas) if np.any(fg_canvas) else rgb_canvas
-            return filled, fg_canvas
+            return _finalize_garment_tile(filled, fg_canvas)
         print(f"  [tile-align] {path.name}: alignment skipped — falling back to bbox-center")
 
     ys, xs = np.where(fg)
@@ -1006,10 +1428,10 @@ def _crop_tile_for_texture(path: Path, tw: int, th: int, thresh: int = 238) -> T
     fg_canvas[oy : oy + nh, ox : ox + nw] = mask_resized
 
     filled = _stabilize_tile_background(canvas, fg_canvas) if np.any(fg_canvas) else canvas
-    return filled, fg_canvas
+    return _finalize_garment_tile(filled, fg_canvas)
 
 
-def _build_direct_texture_atlas(front_jpg: Path, back_jpg: Path) -> np.ndarray:
+def _build_direct_texture_atlas(front_jpg: Path, back_jpg: Path) -> Tuple[np.ndarray, np.ndarray]:
     if cv2 is None:
         _die("OpenCV not available. Install opencv-python.")
     f_direct, f_mask = _crop_tile_for_texture(front_jpg, 1000, 2000)
@@ -1019,6 +1441,10 @@ def _build_direct_texture_atlas(front_jpg: Path, back_jpg: Path) -> np.ndarray:
     atlas = np.zeros((2000, 2000, 3), dtype=np.uint8)
     atlas[0:2000, 0:1000] = f_direct
     atlas[0:2000, 1000:2000] = b_direct
+
+    atlas_a = np.zeros((2000, 2000), dtype=np.uint8)
+    atlas_a[:, 0:1000] = (f_mask.astype(np.uint8) * 255)
+    atlas_a[:, 1000:2000] = (b_mask.astype(np.uint8) * 255)
 
     # Feather blend around the front/back split to reduce a hard seam at U=0.5.
     seam_band = 64
@@ -1033,7 +1459,43 @@ def _build_direct_texture_atlas(front_jpg: Path, back_jpg: Path) -> np.ndarray:
         mix = np.clip((1.0 - t) * lf + t * rb, 0.0, 255.0).astype(np.uint8)
         atlas[:, 1000 - seam_band + i] = mix
         atlas[:, 1000 + i] = mix
-    return atlas
+        amix = np.clip((1.0 - t.squeeze()) * lf_m + t.squeeze() * rb_m, 0.0, 255.0).astype(np.uint8)
+        atlas_a[:, 1000 - seam_band + i] = amix
+        atlas_a[:, 1000 + i] = amix
+
+    # Extend alpha a few pixels past the silhouette so mesh seam UVs sample garment
+    # colour instead of punching transparent holes through to the camera feed.
+    try:
+        expand_px = int(os.environ.get("GARMENT_ATLAS_ALPHA_EXPAND", "6") or "6")
+    except ValueError:
+        expand_px = 4
+    if expand_px > 0:
+        k = max(3, (expand_px * 2 + 1) | 1)
+        el = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (k, k))
+        fg_bool = atlas_a > 128
+        dom = _dominant_garment_color(atlas, fg_bool)
+        if dom is not None and np.any(fg_bool):
+            dil = cv2.dilate(atlas_a, el, iterations=1)
+            expand = (dil > 0) & ~fg_bool
+            if np.any(expand):
+                atlas[expand] = dom
+            atlas_a = dil
+    return _seal_garment_atlas(atlas, atlas_a)
+
+
+def _write_upper_texture(out_path: Path, rgb: np.ndarray, alpha: Optional[np.ndarray] = None) -> Path:
+    """Persist garment atlas; RGBA PNG when alpha is supplied (preferred for try-on cutout)."""
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    if alpha is not None:
+        png_path = out_path.with_suffix(".png")
+        rgba = np.dstack([rgb.astype(np.uint8), alpha.astype(np.uint8)])
+        cv2.imwrite(str(png_path), cv2.cvtColor(rgba, cv2.COLOR_RGBA2BGRA))
+        print(f"[OK] Wrote upper texture (RGBA): {png_path}", flush=True)
+        return png_path
+
+    cv2.imwrite(str(out_path), cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
+    print(f"[OK] Wrote upper texture: {out_path}", flush=True)
+    return out_path
 
 
 def _resolve_pix2surf_assets(pix2surf_root: Path) -> Pix2SurfAssets:
@@ -1142,11 +1604,9 @@ def _infer_upper_texture_with_pix2surf(
 
     if texture_mode == "direct":
         print("[INFO] Building garment texture (mode=direct)…", flush=True)
-        base = _build_direct_texture_atlas(front_jpg, back_jpg)
+        base, base_alpha = _build_direct_texture_atlas(front_jpg, back_jpg)
         print(f"  Direct atlas brightness: mean={float(base.mean()):.1f}/255")
-        out_tex_jpg.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out_tex_jpg), cv2.cvtColor(base, cv2.COLOR_RGB2BGR), [cv2.IMWRITE_JPEG_QUALITY, 95])
-        print(f"[OK] Wrote upper texture: {out_tex_jpg}")
+        _write_upper_texture(out_tex_jpg, base, base_alpha)
 
         metrics = {"ssim": 1.0, "lpips": 0.0, "mode": "direct", "note": "direct atlas (reference==output)"}
         print("SSIM ↑LPIPS ↓", flush=True)
@@ -1242,7 +1702,7 @@ def _infer_upper_texture_with_pix2surf(
         base = p2s_base
         print(f"  Using pix2surf output (mode=pix2surf, brightness={mean_brightness:.0f}/255)")
     else:
-        direct = _build_direct_texture_atlas(front_jpg, back_jpg)
+        direct, direct_alpha = _build_direct_texture_atlas(front_jpg, back_jpg)
         direct_mean = float(direct.mean())
         # Hybrid mode prioritizes direct-photo detail (logos/text) and only keeps a
         # light amount of Pix2Surf warping for plausible UV correspondence.
@@ -1252,19 +1712,16 @@ def _infer_upper_texture_with_pix2surf(
             0,
             255,
         ).astype(np.uint8)
+        base_alpha = direct_alpha
         print(
             f"  Hybrid blend: p2s_w={w_p2s:.2f} direct_mean={direct_mean:.0f} final_mean={base.mean():.1f}/255"
         )
 
-    # Save as JPEG — Blender embeds it directly, correct colours guaranteed
-    out_tex_jpg.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_tex_jpg), cv2.cvtColor(base, cv2.COLOR_RGB2BGR),
-                [cv2.IMWRITE_JPEG_QUALITY, 95])
-    print(f"[OK] Wrote upper texture: {out_tex_jpg}")
+    _write_upper_texture(out_tex_jpg, base, base_alpha if texture_mode == "hybrid" else None)
 
     # Metrics: compare direct-photo atlas vs Pix2Surf atlas (diagnostic)
     try:
-        direct_ref = _build_direct_texture_atlas(front_jpg, back_jpg)
+        direct_ref, _direct_alpha = _build_direct_texture_atlas(front_jpg, back_jpg)
         ssim_v = _ssim_rgb(direct_ref, p2s_base)
         lpips_v = _lpips_rgb(direct_ref, p2s_base)
         metrics = {"ssim": ssim_v, "lpips": lpips_v, "mode": str(texture_mode), "note": "direct atlas vs pix2surf atlas"}
@@ -2246,12 +2703,12 @@ def join_meshes(meshes):
     return bpy.context.view_layer.objects.active
 
 def make_pbr_material(name, tex_path):
-    # Match reference manu_tshirt_smpl_ready.glb: upper_mat — opaque PBR, base color
-    # texture only, double-sided, metallic 0, roughness 0.5, no alpha clip.
+    # PBR with alpha clip so flat-lay backdrop never shows through UV edges.
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     try:
-        mat.blend_method = "OPAQUE"
+        mat.blend_method = "CLIP"
+        mat.alpha_threshold = 0.45
     except Exception:
         pass
     try:
@@ -2292,14 +2749,16 @@ def make_pbr_material(name, tex_path):
         pass
 
     links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if "Alpha" in tex.outputs and "Alpha" in bsdf.inputs:
+        links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
     links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     return mat
 
 def assign_material(obj, mat):
-    if obj.data.materials:
-        obj.data.materials[0] = mat
-    else:
-        obj.data.materials.append(mat)
+    """Replace every material slot so trim/collar panels do not keep default grey."""
+    while obj.data.materials:
+        obj.data.materials.pop()
+    obj.data.materials.append(mat)
 
 def center_object(obj):
     bpy.ops.object.select_all(action="DESELECT")
@@ -2507,7 +2966,8 @@ def make_pbr_material(name, tex_path):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     try:
-        mat.blend_method = "OPAQUE"
+        mat.blend_method = "CLIP"
+        mat.alpha_threshold = 0.45
     except Exception:
         pass
     try:
@@ -2542,15 +3002,16 @@ def make_pbr_material(name, tex_path):
         pass
 
     links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if "Alpha" in tex.outputs and "Alpha" in bsdf.inputs:
+        links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
     links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     return mat
 
 def assign_material_to_meshes(meshes, mat):
     for m in meshes:
-        if m.data.materials:
-            m.data.materials[0] = mat
-        else:
-            m.data.materials.append(mat)
+        while m.data.materials:
+            m.data.materials.pop()
+        m.data.materials.append(mat)
 
 def apply_uniform_scale_all_objects(s):
     if abs(float(s) - 1.0) < 1e-8:
@@ -2651,7 +3112,8 @@ def make_pbr_material(name, tex_path):
     mat = bpy.data.materials.new(name=name)
     mat.use_nodes = True
     try:
-        mat.blend_method = "OPAQUE"
+        mat.blend_method = "CLIP"
+        mat.alpha_threshold = 0.45
     except Exception:
         pass
     try:
@@ -2678,14 +3140,16 @@ def make_pbr_material(name, tex_path):
     except Exception:
         pass
     links.new(tex.outputs["Color"], bsdf.inputs["Base Color"])
+    if "Alpha" in tex.outputs and "Alpha" in bsdf.inputs:
+        links.new(tex.outputs["Alpha"], bsdf.inputs["Alpha"])
     links.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
     return mat
 
 def assign_material(obj, mat):
-    if obj.data.materials:
-        obj.data.materials[0] = mat
-    else:
-        obj.data.materials.append(mat)
+    """Replace every material slot so trim/collar panels do not keep default grey."""
+    while obj.data.materials:
+        obj.data.materials.pop()
+    obj.data.materials.append(mat)
 
 def center_object(obj):
     bpy.ops.object.select_all(action="DESELECT")
@@ -3022,6 +3486,9 @@ def main() -> None:
             texture_mode=args.texture_mode,
             out_tex_jpg=garment_tex,
         )
+        png_tex = garment_tex.with_suffix(".png")
+        if png_tex.is_file():
+            garment_tex = png_tex
 
     out_glb = args.out_glb.resolve()
     out_json = out_glb.with_suffix(".json")

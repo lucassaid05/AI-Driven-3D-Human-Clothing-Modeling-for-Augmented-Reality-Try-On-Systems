@@ -139,6 +139,12 @@ CONFIG = {
     "TILE_HEM_FRAC": _e("TILE_HEM_FRAC", "0.92"),
     # 1 = photo covers full tile + mesh UV uses full bbox (default; avoids margin bands)
     "TEXTURE_FULL_BLEED": _e("GARMENT_TEXTURE_FULL_BLEED", "1"),
+    # 1 = non-uniform warp so user photos fill the garment tile / model UV (default)
+    "TEXTURE_WARP_FILL": _e("GARMENT_TEXTURE_WARP_FILL", "1"),
+    "MASK_BRIDGE_KERNEL": _e("GARMENT_MASK_BRIDGE_KERNEL", "35"),
+    "MASK_EXPAND_PX": _e("GARMENT_MASK_EXPAND_PX", "8"),
+    "ATLAS_ALPHA_EXPAND": _e("GARMENT_ATLAS_ALPHA_EXPAND", "6"),
+    "SOLIDIFY_SILHOUETTE": _e("GARMENT_SOLIDIFY_SILHOUETTE", "1"),
     # Optional HTTPS (paths relative to this script’s folder). Create with mkcert or openssl.
     "HTTPS_CERT": _e("HTTPS_CERT", "").strip(),
     "HTTPS_KEY": _e("HTTPS_KEY", "").strip(),
@@ -785,6 +791,11 @@ class APIHandler(SimpleHTTPRequestHandler):
             utf8_env["GARMENT_TILE_SHOULDER_FRAC"] = str(CONFIG["TILE_SHOULDER_FRAC"])
             utf8_env["GARMENT_TILE_HEM_FRAC"] = str(CONFIG["TILE_HEM_FRAC"])
             utf8_env["GARMENT_TEXTURE_FULL_BLEED"] = str(CONFIG["TEXTURE_FULL_BLEED"])
+            utf8_env["GARMENT_TEXTURE_WARP_FILL"] = str(CONFIG["TEXTURE_WARP_FILL"])
+            utf8_env["GARMENT_MASK_BRIDGE_KERNEL"] = str(CONFIG["MASK_BRIDGE_KERNEL"])
+            utf8_env["GARMENT_MASK_EXPAND_PX"] = str(CONFIG["MASK_EXPAND_PX"])
+            utf8_env["GARMENT_ATLAS_ALPHA_EXPAND"] = str(CONFIG["ATLAS_ALPHA_EXPAND"])
+            utf8_env["GARMENT_SOLIDIFY_SILHOUETTE"] = str(CONFIG["SOLIDIFY_SILHOUETTE"])
             utf8_env["GARMENT_EXPORT_RIGID"] = str(CONFIG["GARMENT_EXPORT_RIGID"])
             if paths["has_canonical_glb"]:
                 utf8_env["GARMENT_CANONICAL_GLB"] = str(paths["garment_canonical_glb"])

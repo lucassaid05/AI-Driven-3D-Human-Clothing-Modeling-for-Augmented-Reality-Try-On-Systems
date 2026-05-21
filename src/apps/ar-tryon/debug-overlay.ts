@@ -38,9 +38,11 @@ export function drawHudOverlay(
   line(`Shirt side src: ${String(debugInfo.faceFacingSource || 'legacy')}`);
   const pitch = (((debugInfo.pitch as number) || 0) * 180) / Math.PI;
   const roll = (((debugInfo.roll as number) || 0) * 180) / Math.PI;
+  const yaw = (((debugInfo.yaw as number) || 0) * 180) / Math.PI;
   const zLean = ((debugInfo.zLean as number) || 0).toFixed(3);
-  line(`Pitch: ${pitch.toFixed(1)}° | Roll: ${roll.toFixed(1)}°`);
-  line(`Z-Lean: ${zLean} (neg=fwd)`);
+  const pBlend = ((debugInfo.profileBlend as number) || 0).toFixed(2);
+  line(`Yaw: ${yaw.toFixed(1)}° | Pitch: ${pitch.toFixed(1)}° | Roll: ${roll.toFixed(1)}°`);
+  line(`Profile blend: ${pBlend} | Z-Lean: ${zLean} (neg=fwd)`);
   line('─────────────────────────────');
   line(`Shoulder Width: ${(debugInfo.shoulderWidth as number).toFixed(4)}`);
   line(`Torso Height: ${(debugInfo.torsoHeight as number).toFixed(4)}`);
@@ -67,12 +69,12 @@ const SKELETON_CONNECTIONS: [number, number][] = [
   [23, 24]
 ];
 
+/** Landmarks already mapped into visible viewport space (0..1), same as garment poseToWorld. */
 export function drawSkeletonOverlay(
   ctx: CanvasRenderingContext2D,
   width: number,
   height: number,
-  pose: PoseLandmark[],
-  mirrorView: boolean
+  pose: PoseLandmark[]
 ): void {
   ctx.strokeStyle = '#00f5d4';
   ctx.lineWidth = 2;
@@ -80,29 +82,21 @@ export function drawSkeletonOverlay(
   for (const [i, j] of SKELETON_CONNECTIONS) {
     const a = pose[i];
     const b = pose[j];
+    if (!a || !b) continue;
     if ((a.visibility || 0) > 0.3 && (b.visibility || 0) > 0.3) {
-      let ax = a.x * width;
-      let bx = b.x * width;
-      if (mirrorView) {
-        ax = width - ax;
-        bx = width - bx;
-      }
       ctx.beginPath();
-      ctx.moveTo(ax, a.y * height);
-      ctx.lineTo(bx, b.y * height);
+      ctx.moveTo(a.x * width, a.y * height);
+      ctx.lineTo(b.x * width, b.y * height);
       ctx.stroke();
     }
   }
 
   ctx.fillStyle = '#f72585';
   for (const lm of pose) {
-    if ((lm.visibility || 0) > 0.3) {
-      let x = lm.x * width;
-      if (mirrorView) x = width - x;
-      ctx.beginPath();
-      ctx.arc(x, lm.y * height, 4, 0, Math.PI * 2);
-      ctx.fill();
-    }
+    if (!lm || (lm.visibility || 0) <= 0.3) continue;
+    ctx.beginPath();
+    ctx.arc(lm.x * width, lm.y * height, 4, 0, Math.PI * 2);
+    ctx.fill();
   }
 }
 
@@ -111,8 +105,7 @@ export function drawMpMappingLayer(
   width: number,
   height: number,
   pose: PoseLandmark[],
-  garmentMetadata: { mediapipe_mapping?: Record<string, { smpl_joint?: string }> } | null,
-  mirrorView: boolean
+  garmentMetadata: { mediapipe_mapping?: Record<string, { smpl_joint?: string }> } | null
 ): void {
   const map = garmentMetadata?.mediapipe_mapping;
   if (!map || !pose) return;
@@ -135,8 +128,7 @@ export function drawMpMappingLayer(
     if (i < 0 || i >= pose.length) continue;
     const lm = pose[i];
     if (!lm || (lm.visibility || 0) < 0.28) continue;
-    let x = lm.x * width;
-    if (mirrorView) x = width - x;
+    const x = lm.x * width;
     const y = lm.y * height;
     ctx.beginPath();
     ctx.arc(x, y, 8, 0, Math.PI * 2);

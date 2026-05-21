@@ -26,6 +26,8 @@ import {
  * user's real frame without distorting landmark-anchored placement math.
  */
 const AR_TRYON_SCALE_TRIM = 0.92;
+/** Slight uniform boost so mesh panels overlap the body and hide seam gaps. */
+const AR_TRYON_COVERAGE_BOOST = 1.04;
 
 export class ARTryOn {
     constructor() {
@@ -81,6 +83,10 @@ export class ARTryOn {
         this.smoothedRotation = 0;
         /** Side-profile x anchor lock ('left'|'right') to prevent depth-noise shoulder flips. */
         this._profileAnchorSide = null;
+        /** +1 / -1 profile yaw hemisphere — hysteresis stops left/right shoulder z noise from flipping the shirt. */
+        this._profileYawSign = null;
+        /** Smoothed 0..1 blend toward side-profile yaw (π/2). */
+        this._smoothedProfileBlend = 0;
         /** Last stable torso landmarks for one-limb occlusion fallback. */
         this._lastReliableTorso = null;
         /** Hide garment when tracking is unreliable */
@@ -183,6 +189,13 @@ export class ARTryOn {
         this._presetWarmupStarted = false;
         this._generationInProgress = false;
         this._autoGenTimer = null;
+        this._uiBound = false;
+        this._pollIntervalId = null;
+        this._pollTaskId = null;
+        this._garmentLoadInFlight = false;
+        this._garmentLoadKey = '';
+        this._garmentLoadToken = 0;
+        this._metaFetchToken = 0;
         
         this.setupThreeJS();
         this.setupMediaPipe();
@@ -651,6 +664,7 @@ export class ARTryOn {
         const a = this.settings.mirrorView;
         if (this.video) this.video.style.transform = a ? 'scaleX(-1)' : 'none';
         if (this.threeCanvas) this.threeCanvas.style.transform = 'none';
+        // Debug overlay: mirror in draw coords (_poseViewportOverlay), not CSS — keeps HUD text readable.
         if (this.debugCanvas) this.debugCanvas.style.transform = 'none';
         if (this.camera) {
             this.camera.scale.set(a ? -1 : 1, 1, 1);
@@ -1082,6 +1096,12 @@ export class ARTryOn {
                 if (m.isMeshStandardMaterial) {
                     m.metalness = 0;
                     if (typeof m.roughness === 'number' && m.roughness < 0.4) m.roughness = 0.55;
+                    // RGBA garment atlas: clip only true backdrop; gaps are filled with garment RGB.
+                    if (m.map) {
+                        m.transparent = true;
+                        m.alphaTest = 0.12;
+                        m.depthWrite = true;
+                    }
                     m.needsUpdate = true;
                 }
             }
@@ -1141,6 +1161,8 @@ export class ARTryOn {
             this.smoothedYaw = 0;
             this.smoothedPitch = 0;
             this.smoothedRoll = 0;
+            this._profileYawSign = null;
+            this._smoothedProfileBlend = 0;
 
             const url = URL.createObjectURL(file);
             const loader = new GLTFLoader();
@@ -1158,6 +1180,7 @@ export class ARTryOn {
             
             // Create group
             this.garmentGroup = new THREE.Group();
+            this.garmentGroup.rotation.order = 'YXZ';
             this.garmentModel = gltf.scene;
             this.garmentGroup.add(this.garmentModel);
             this.scene.add(this.garmentGroup);
@@ -1447,9 +1470,6 @@ export class ARTryOn {
         console.log(boneNames.join(', '));
         console.log('==========================');
 
-        if (this.garmentGroup) {
-            this.measureGarmentFromBones();
-        }
     }
 
     /**
@@ -1743,6 +1763,19 @@ export class ARTryOn {
         return new THREE.Vector3(x, y, z);
     }
 
+    /** Midpoint of the shoulder line and hip line in world space (centre of the debug skeleton torso). */
+    _poseSkeletonTorsoMid(ls, rs, lh, rh, pLS, pRS, pLH, pRH) {
+        const vSh = Math.max(0.15, (ls.visibility || 0) + (rs.visibility || 0));
+        const vHp = Math.max(0.15, (lh.visibility || 0) + (rh.visibility || 0));
+        const shoulderMid = pLS.clone().add(pRS).multiplyScalar(0.5);
+        const hipMid = pLH.clone().add(pRH).multiplyScalar(0.5);
+        return new THREE.Vector3(
+            (shoulderMid.x * vSh + hipMid.x * vHp) / (vSh + vHp),
+            (shoulderMid.y * vSh + hipMid.y * vHp) / (vSh + vHp),
+            0
+        );
+    }
+
     /** Screen-space torso metrics. Null if shoulders unusable. */
     _measureBodyFromPose(pose) {
         const robust = this._buildOcclusionRobustTorso(pose);
@@ -1766,13 +1799,15 @@ export class ARTryOn {
 
         const expectedShoulderWidth = Math.max(0.01, torsoHeightScreen * 0.65);
         const viewAngleRatio = shoulderWidthScreen / expectedShoulderWidth;
+        const shoulderDepthSpan = Math.abs((ls.z || 0) - (rs.z || 0));
+        const profileDepthCue = shoulderDepthSpan > 0.045 && shoulderWidthScreen < 0.2;
 
         let effectiveWidth;
         let viewAngle;
-        if (viewAngleRatio < 0.35) {
+        if (viewAngleRatio < 0.42 || profileDepthCue) {
             effectiveWidth = torsoHeightScreen * 0.45;
             viewAngle = 'SIDE';
-        } else if (viewAngleRatio < 0.65) {
+        } else if (viewAngleRatio < 0.68) {
             effectiveWidth = Math.max(shoulderWidthScreen, torsoHeightScreen * 0.60);
             viewAngle = 'ANGLE';
         } else {
@@ -1811,8 +1846,9 @@ export class ARTryOn {
      * If nose/eyes are visible and in front of shoulders (MediaPipe z), treat as facing camera → shirt FRONT.
      * Returns 'front' | null. ('back' is not inferred here — legacy hysteresis still handles turned-away.)
      */
-    _computeFaceFacingOverride(pose, ls, rs) {
+    _computeFaceFacingOverride(pose, ls, rs, viewAngle = 'FRONT') {
         if (!this.settings.useFaceFacingHint || !pose) return null;
+        if (viewAngle === 'SIDE' || viewAngle === 'ANGLE') return null;
         const nose = pose[this.MP.NOSE];
         if (!nose) return null;
         const le = pose[this.MP.LEFT_EYE];
@@ -1973,10 +2009,12 @@ export class ARTryOn {
 
         const {
             ls, rs, lh, rh, LS, RS, LH, RH,
-            shoulderCenterY, hipCenterY, shoulderWidthScreen, torsoHeightScreen, effectiveWidth
+            shoulderCenterY, hipCenterY, shoulderWidthScreen, torsoHeightScreen, effectiveWidth,
+            viewAngleRatio
         } = M;
 
         this.debugInfo.viewAngle = M.viewAngle;
+        this.debugInfo.viewAngleRatio = viewAngleRatio;
         this.debugInfo.shoulderWidth = shoulderWidthScreen;
         this.debugInfo.torsoHeight = torsoHeightScreen;
         this.debugInfo.effectiveWidth = effectiveWidth;
@@ -1984,19 +2022,22 @@ export class ARTryOn {
 
         const pLS = this.poseToWorld(ls);
         const pRS = this.poseToWorld(rs);
+        const pLH = this.poseToWorld(lh);
+        const pRH = this.poseToWorld(rh);
         const poseShoulderMid = pLS.clone().add(pRS).multiplyScalar(0.5);
         poseShoulderMid.z = 0;
 
         const hipVisPose = (lh.visibility || 0) > 0.24 && (rh.visibility || 0) > 0.24;
         let poseHipMid;
         if (hipVisPose) {
-            poseHipMid = this.poseToWorld(lh).clone().add(this.poseToWorld(rh)).multiplyScalar(0.5);
+            poseHipMid = pLH.clone().add(pRH).multiplyScalar(0.5);
         } else {
             poseHipMid = poseShoulderMid.clone();
             const hipDrop = Math.max(Math.max(0.06, shoulderWidthScreen * 0.8), torsoHeightScreen * 1.9);
             poseHipMid.y = poseShoulderMid.y - hipDrop;
         }
         poseHipMid.z = 0;
+        const poseSkeletonMid = this._poseSkeletonTorsoMid(ls, rs, lh, rh, pLS, pRS, pLH, pRH);
         const dPoseYWorld = Math.max(1e-6, Math.abs(poseShoulderMid.y - poseHipMid.y));
 
         // Match computeFitStructuralMul(): shoulder span in image-plane world units.
@@ -2054,7 +2095,8 @@ export class ARTryOn {
         // position math (which composes with this value).
         const trim = THREE.MathUtils.clamp(Number(this.settings.autoScaleTrim) || AR_TRYON_SCALE_TRIM, 0.65, 1.15);
         const squeezeX = THREE.MathUtils.clamp(Number(this.settings.autoShoulderSqueezeX) || 1, 0.75, 1.05);
-        const applied = u * trim;
+        const boost = THREE.MathUtils.clamp(AR_TRYON_COVERAGE_BOOST, 1.0, 1.12);
+        const applied = u * trim * boost;
         this.garmentGroup.scale.set(applied * squeezeX, applied, applied);
 
         // ========================================
@@ -2070,7 +2112,7 @@ export class ARTryOn {
         const noseOk = nose && (nose.visibility || 0) > 0.35;
         const shoulderMidZ = (ls.z + rs.z) * 0.5;
 
-        const faceHint = this._computeFaceFacingOverride(pose, ls, rs);
+        const faceHint = this._computeFaceFacingOverride(pose, ls, rs, this.debugInfo.viewAngle);
         if (faceHint === 'front') {
             this._hystFacingAway = false;
             this.debugInfo.faceFacingSource = 'face';
@@ -2081,57 +2123,112 @@ export class ARTryOn {
             this.debugInfo.faceFacingSource = 'legacy';
         }
         const isFacingAway = this._hystFacingAway;
-        
-        // Body yaw from shoulder depth (raw landmark z). Ortho camera scale.x = -1 mirrors the *rendered* scene,
-        // but this yaw is derived in unmirrored landmark space — without a sign fix the shirt twists vs the selfie feed.
+        const vAngle = String(this.debugInfo.viewAngle || 'FRONT').toUpperCase();
+        const isFrontLike = vAngle === 'FRONT';
+        const isAngleView = vAngle === 'ANGLE';
+
+        // Yaw: front ≈ 0; profile ≈ ±90° (π/2) so the shirt side faces the camera; angle blends between.
         const shoulderDepthDiff = ls.z - rs.z;
         const yawSign = this.settings.mirrorView ? 1 : -1;
-        // SIDE: small shoulder separation makes z depth very sensitive — high gain was rotating the mesh
-        // heavily and sliding the shirt horizontally (felt “mirrored” on one profile). Use moderate gain + clamp.
-        const yawGain = isSideView ? 2.05 : (isAmbiguousSep ? 4.75 : 2);
+        const yawGain = isFrontLike ? 0.48 : (isAmbiguousSep ? 1.0 : 0.65);
         let estimatedYaw = yawSign * shoulderDepthDiff * yawGain;
         const shoulderSep = Math.abs(rawDiff);
-        const yawReliability = THREE.MathUtils.clamp((shoulderSep - 0.055) / 0.14, 0.2, 1.0);
+        const yawReliability = THREE.MathUtils.clamp((shoulderSep - 0.04) / 0.12, 0.12, 1.0);
         estimatedYaw *= yawReliability;
-        if (isSideView) {
-            estimatedYaw = THREE.MathUtils.clamp(estimatedYaw, -1.12, 1.12);
+
+        const zl = ls.z || 0;
+        const zr = rs.z || 0;
+        const depthSpan = Math.abs(zl - zr);
+        let profileSign = zr <= zl ? 1 : -1;
+        if (this.settings.mirrorView) profileSign *= -1;
+        profileSign *= -1; // invert: previous hemisphere showed the wrong shirt side in profile
+        if (isSideView || isAngleView) {
+            if (this._profileYawSign == null) {
+                this._profileYawSign = profileSign;
+            } else if (depthSpan > 0.035) {
+                this._profileYawSign = profileSign;
+            }
+        } else {
+            this._profileYawSign = null;
         }
-        // 180° for facing away; hysteresis above prevents boundary flicker (no extra shoulder-width gate)
-        // Smoothly blend front->back around profile; binary PI jumps near side cause misalignment.
+
+        const profileYawMag = Math.PI * 0.5;
+        let profileYawTarget = (this._profileYawSign ?? profileSign) * profileYawMag;
+        profileYawTarget += yawSign * shoulderDepthDiff * 0.22;
+        profileYawTarget = THREE.MathUtils.clamp(profileYawTarget, -profileYawMag * 1.08, profileYawMag * 1.08);
+
+        let profileBlendTarget = 0;
+        if (isSideView) {
+            profileBlendTarget = THREE.MathUtils.clamp(0.55 + (0.42 - viewAngleRatio) * 1.2, 0.72, 1);
+        } else if (isAngleView) {
+            profileBlendTarget = THREE.MathUtils.clamp((0.68 - viewAngleRatio) / 0.26, 0, 1);
+        }
+        const profileBlendStep = profileBlendTarget > (this._smoothedProfileBlend || 0) ? 0.1 : 0.07;
+        this._smoothedProfileBlend = THREE.MathUtils.lerp(
+            this._smoothedProfileBlend || 0,
+            profileBlendTarget,
+            profileBlendStep
+        );
+        const profileBlend = this._smoothedProfileBlend;
+        if (profileBlend > 0.02) {
+            estimatedYaw = THREE.MathUtils.lerp(estimatedYaw, profileYawTarget, profileBlend);
+        }
+
         const frontalness = THREE.MathUtils.clamp((shoulderSepNorm - 0.075) / 0.16, 0, 1);
-        if (isFacingAway) {
-            // When shoulders get close (profile/back), frontalness→0. We actually want MORE of the 180° turn there,
-            // otherwise yaw hovers near 0 and rapidly flips as MediaPipe swaps left/right for the back-facing pose.
+        if (isFacingAway && !isFrontLike && profileBlend < 0.55) {
             const backness = 1 - frontalness;
-            estimatedYaw += Math.PI * backness;
-            // Back-facing + low shoulder separation is the most unstable regime (landmarks often swap).
-            // Hold yaw near the current smoothed value so we don't "freak out" around the 180° boundary.
+            if (backness > 0.62) estimatedYaw += Math.PI * backness * 0.9;
             if (shoulderSepNorm < 0.085 && this.smoothedYaw != null) {
                 estimatedYaw = this.smoothedYaw;
             }
         }
-        
+        if (isFrontLike && !isFacingAway) {
+            estimatedYaw = THREE.MathUtils.clamp(estimatedYaw, -0.14, 0.14);
+        }
+
         const shoulderAvgZ = (ls.z + rs.z) / 2;
         const hipAvgZ = (lh.z + rh.z) / 2;
         const zLean = shoulderAvgZ - hipAvgZ;
-        
-        let estimatedPitch = zLean * 2.15;
+
+        let estimatedPitch = zLean * (isFrontLike ? 0.75 : 1.2);
         if (this.settings.mirrorView) estimatedPitch = -estimatedPitch;
-        estimatedPitch = THREE.MathUtils.clamp(estimatedPitch, -0.36, 0.36);
-        
-        const shoulderHeightDiff = RS.y - LS.y;
-        const estimatedRoll = shoulderHeightDiff * (this.settings.mirrorView ? -1 : 1);
-        
+        const pitchCap = isSideView ? 0.38 : (vAngle === 'ANGLE' ? 0.26 : 0.12);
+        estimatedPitch = THREE.MathUtils.clamp(estimatedPitch, -pitchCap, pitchCap);
+
+        // Roll follows the skeleton shoulder segment (screen-left → screen-right).
+        let leftShoulder = pLS;
+        let rightShoulder = pRS;
+        if (leftShoulder.x > rightShoulder.x) {
+            const tmp = leftShoulder;
+            leftShoulder = rightShoulder;
+            rightShoulder = tmp;
+        }
+        const shoulderDx = rightShoulder.x - leftShoulder.x;
+        const shoulderDy = rightShoulder.y - leftShoulder.y;
+        const shoulderSpanWorld = Math.hypot(shoulderDx, shoulderDy);
+        let estimatedRoll = Math.atan2(shoulderDy, shoulderDx);
+        if (shoulderSpanWorld < 0.045) {
+            estimatedRoll *= THREE.MathUtils.clamp(shoulderSpanWorld / 0.045, 0, 1);
+        }
+        const rollCap = isSideView ? 0.72 : (vAngle === 'ANGLE' ? 0.38 : 0.11);
+        estimatedRoll = THREE.MathUtils.clamp(estimatedRoll, -rollCap, rollCap);
+
         if (this.smoothedYaw === undefined) this.smoothedYaw = 0;
         if (this.smoothedPitch === undefined) this.smoothedPitch = 0;
         if (this.smoothedRoll === undefined) this.smoothedRoll = 0;
-        
-        this.smoothedYaw = lerpAngle(this.smoothedYaw, estimatedYaw, 0.15);
-        this.smoothedPitch = 0.4 * estimatedPitch + 0.6 * this.smoothedPitch;
-        this.smoothedRoll = 0.25 * estimatedRoll + 0.75 * this.smoothedRoll;
+
+        const yawBlend = isFrontLike
+            ? 0.06
+            : (isSideView ? 0.11 : (isAngleView ? 0.09 : (isAmbiguousSep ? 0.09 : 0.1)));
+        const rotBlend = isFrontLike ? 0.06 : (isSideView ? 0.1 : (isAngleView ? 0.09 : (isAmbiguousSep ? 0.1 : 0.11)));
+        this.smoothedYaw = lerpAngle(this.smoothedYaw, estimatedYaw, yawBlend);
+        this.smoothedPitch = lerpAngle(this.smoothedPitch, estimatedPitch, rotBlend);
+        this.smoothedRoll = lerpAngle(this.smoothedRoll, estimatedRoll, rotBlend);
         
         this.debugInfo.roll = this.smoothedRoll;
         this.debugInfo.pitch = this.smoothedPitch;
+        this.debugInfo.yaw = this.smoothedYaw;
+        this.debugInfo.profileBlend = profileBlend;
         this.debugInfo.zLean = zLean;
         this.debugInfo.facingAway = isFacingAway;
         
@@ -2142,25 +2239,17 @@ export class ARTryOn {
         );
 
         // ========================================
-        // POSITIONING — shoulder bind ↔ MP 11/12; hem bind ↔ hip line (23/24 or estimate)
+        // POSITIONING — lock garment torso centre to skeleton torso midpoint (shoulder+hip mid)
         // ========================================
-        const poseAnchor = poseShoulderMid.clone();
-        poseAnchor.z = 0;
-
-        // Automatic vertical correction: lower the anchor slightly so the garment shoulder seam
-        // visually matches the user's shoulders (MP landmarks sit a touch high on many feeds).
         const dropFrac = THREE.MathUtils.clamp(Number(this.settings.autoShoulderDrop) || 0, 0, 0.18);
-        const viewDropMul = this.debugInfo.viewAngle === 'SIDE' ? 0.55 : (this.debugInfo.viewAngle === 'ANGLE' ? 0.8 : 1.0);
+        const viewDropMul = vAngle === 'SIDE' ? 0.55 : (vAngle === 'ANGLE' ? 0.8 : 1.0);
         const autoDrop = THREE.MathUtils.clamp(dropFrac * dPoseYWorld * viewDropMul, 0, 0.18);
-        poseAnchor.y -= autoDrop;
         this.debugInfo.shoulderDropWorld = autoDrop;
 
-        const shoulderSepNormPos = Math.abs(rs.x - ls.x);
-        const useProfileAnchor = this.debugInfo.viewAngle === 'SIDE' || shoulderSepNormPos < 0.18;
-        if (useProfileAnchor) {
-            // Profile: 2D midpoint of LS/RS is often biased (occluded shoulder drifts in x). Anchor x to the
-            // shoulder closer to the camera (smaller MediaPipe z) so left vs right profile stay consistent
-            // with the mirrored selfie camera, instead of sliding the model the wrong way.
+        const poseAnchor = poseSkeletonMid.clone();
+        poseAnchor.y -= autoDrop * 0.35;
+
+        if (vAngle === 'SIDE') {
             const zl = ls.z || 0;
             const zr = rs.z || 0;
             if (!this._profileAnchorSide) {
@@ -2184,98 +2273,42 @@ export class ARTryOn {
             const vFwd = Math.max(0.14, rightCloser ? (rs.visibility || 0) : (ls.visibility || 0));
             const vBack = Math.max(0.14, rightCloser ? (ls.visibility || 0) : (rs.visibility || 0));
             const w = vFwd / (vFwd + vBack);
-            // Side gets strong front-shoulder anchoring; angled/back-angled keeps a softer bias.
-            const profileStrength = this.debugInfo.viewAngle === 'SIDE'
-                ? 1
-                : THREE.MathUtils.clamp((0.18 - shoulderSepNormPos) / 0.1, 0, 1);
-            const fwdBase = THREE.MathUtils.lerp(0.54, 0.62, profileStrength);
-            const fwdGain = THREE.MathUtils.lerp(0.12, 0.28, profileStrength);
-            const wFwd = fwdBase + fwdGain * w;
-            const wBack = 1 - wFwd;
-            poseAnchor.x = pFwd.x * wFwd + pBack.x * wBack;
+            const wFwd = 0.58 + 0.22 * w;
+            poseAnchor.x = pFwd.x * wFwd + pBack.x * (1 - wFwd);
             if (hipVisPose) {
-                const pLH = this.poseToWorld(lh);
-                const pRH = this.poseToWorld(rh);
                 const vhl = Math.max(0.08, lh.visibility || 0);
                 const vhr = Math.max(0.08, rh.visibility || 0);
                 const hipMidX = (pLH.x * vhl + pRH.x * vhr) / (vhl + vhr);
-                const hipMix = THREE.MathUtils.lerp(0.14, 0.18, profileStrength);
-                poseAnchor.x = poseAnchor.x * (1 - hipMix) + hipMidX * hipMix;
+                poseAnchor.x = poseAnchor.x * 0.84 + hipMidX * 0.16;
             }
         } else {
             this._profileAnchorSide = null;
         }
 
-        const poseBodyCenter = poseAnchor.clone();
-        // Use a torso-centered anchor (not just shoulders). Shoulders are reliable but sit high; hips stabilize
-        // center-of-mass so the garment doesn't "float" or slide during turns.
-        const vAngle = String(this.debugInfo.viewAngle || 'FRONT').toUpperCase();
-        const torsoMix =
-            vAngle === 'SIDE' ? 0.62 :
-                (vAngle === 'ANGLE' ? 0.42 : 0.26);
-        poseBodyCenter.x = THREE.MathUtils.lerp(poseAnchor.x, poseHipMid.x, torsoMix);
-        poseBodyCenter.y = THREE.MathUtils.lerp(poseAnchor.y, poseHipMid.y, 0.5);
-        poseBodyCenter.z = 0;
+        const bindOff = (local) => {
+            const v = local.clone();
+            v.applyQuaternion(this.garmentGroup.quaternion);
+            v.multiply(this.garmentGroup.scale);
+            return v;
+        };
 
         let targetPos;
-        if (this.garmentBindBodyCenter) {
-            const bindOff = (local) => {
-                const v = local.clone();
-                v.applyQuaternion(this.garmentGroup.quaternion);
-                v.multiply(this.garmentGroup.scale);
-                return v;
-            };
-            const bodyOff = bindOff(this.garmentBindBodyCenter);
-            targetPos = poseBodyCenter.clone().sub(bodyOff);
+        const bindCenter = this.garmentBindBodyCenter || this.garmentBindShoulderMid;
+        if (bindCenter) {
+            targetPos = poseAnchor.clone().sub(bindOff(bindCenter));
             targetPos.z = 0;
-
-            if (this.garmentBindShoulderMid || this.garmentBindHemMid) {
-                // Lock the garment's shoulder line to the user's detected
-                // shoulder line (shoulders are what the eye reads most; if
-                // they drift, the shirt looks like it's floating above the
-                // body). Hem gets a much softer nudge so it doesn't fight
-                // the shoulder anchor when torso proportions don't match.
-                let yCorrection = 0;
-                if (this.garmentBindShoulderMid) {
-                    const shoulderOff = bindOff(this.garmentBindShoulderMid);
-                    const shY = targetPos.y + shoulderOff.y;
-                    yCorrection += (poseAnchor.y - shY) * 0.78;
-                }
-                if (this.garmentBindHemMid) {
-                    const hemOff = bindOff(this.garmentBindHemMid);
-                    const hemY = targetPos.y + hemOff.y;
-                    yCorrection += (poseHipMid.y - hemY) * 0.30;
-                }
-                targetPos.y += yCorrection;
-            }
-        } else if (this.garmentBindShoulderMid) {
-            const bindOff = (local) => {
-                const v = local.clone();
-                v.applyQuaternion(this.garmentGroup.quaternion);
-                v.multiply(this.garmentGroup.scale);
-                return v;
-            };
-            const shoulderOff = bindOff(this.garmentBindShoulderMid);
-            targetPos = poseAnchor.clone().sub(shoulderOff);
-            targetPos.z = 0;
-
-            if (this.garmentBindHemMid) {
-                const hemOff = bindOff(this.garmentBindHemMid);
-                const hemY = targetPos.y + hemOff.y;
-                const hemErr = poseHipMid.y - hemY;
-                targetPos.y += hemErr * 0.94;
-                const shoulderOff2 = bindOff(this.garmentBindShoulderMid);
-                const shY = targetPos.y + shoulderOff2.y;
-                targetPos.y += (poseAnchor.y - shY) * 0.28;
+            if (this.garmentBindShoulderMid && this.garmentBindBodyCenter) {
+                const shoulderOff = bindOff(this.garmentBindShoulderMid);
+                const shY = targetPos.y + shoulderOff.y;
+                const shoulderTargetY = poseShoulderMid.y - autoDrop * 0.65;
+                targetPos.y += (shoulderTargetY - shY) * 0.18;
             }
         } else {
-            const shoulderCenterX = (LS.x + RS.x) / 2;
-            const nudgeDown = torsoHeightScreen * 0.08;
-            const tcx = shoulderCenterX;
-            const tcy = shoulderCenterY + nudgeDown;
+            const tcx = (LS.x + RS.x + LH.x + RH.x) / 4;
+            const tcy = (shoulderCenterY + hipCenterY) / 2 + torsoHeightScreen * 0.02;
             targetPos = new THREE.Vector3(
-                (tcx - 0.5) * 2 + this.settings.offsetX,
-                -(tcy - 0.5) * 2 + this.settings.offsetY,
+                (tcx - 0.5) * 2,
+                -(tcy - 0.5) * 2,
                 0
             );
         }
@@ -2286,7 +2319,8 @@ export class ARTryOn {
         targetPos.y += Number(this.settings.offsetY) || 0;
         targetPos.z = 0;
 
-        this.smoothedPosition.lerp(targetPos, 0.38);
+        const posBlend = this.debugInfo.viewAngle === 'SIDE' ? 0.28 : 0.22;
+        this.smoothedPosition.lerp(targetPos, posBlend);
         this.garmentGroup.position.copy(this.smoothedPosition);
 
         const matKey = `${isFacingAway}|${this.debugInfo.viewAngle}|${this.settings.frontFaceOnly}|${this.settings.wireframe}|${this.settings.garmentCullInvert}`;
@@ -2297,17 +2331,32 @@ export class ARTryOn {
     }
     
     
+    /** Map landmarks into on-screen space (cover crop + selfie mirror) for the 2D debug overlay. */
+    _poseViewportOverlay(pose) {
+        if (!pose) return pose;
+        const mirror = this.settings.mirrorView;
+        return pose.map((lm) => {
+            const n = this._poseToViewportNorm(lm);
+            return {
+                x: mirror ? 1 - n.x : n.x,
+                y: n.y,
+                z: lm.z,
+                visibility: lm.visibility
+            };
+        });
+    }
+
     drawSkeleton(pose) {
         const w = this.debugCanvas.width;
         const h = this.debugCanvas.height;
-        drawSkeletonOverlay(this.debugCtx, w, h, pose, this.settings.mirrorView);
+        drawSkeletonOverlay(this.debugCtx, w, h, this._poseViewportOverlay(pose));
     }
 
     /** Coloured dots on mapped MediaPipe indices (needs garment.json from pipeline). */
     drawMpMappingOverlay(pose) {
         const w = this.debugCanvas.width;
         const h = this.debugCanvas.height;
-        drawMpMappingLayer(this.debugCtx, w, h, pose, this.garmentMetadata, this.settings.mirrorView);
+        drawMpMappingLayer(this.debugCtx, w, h, this._poseViewportOverlay(pose), this.garmentMetadata);
     }
 
     drawHud(conf) {
@@ -2438,6 +2487,8 @@ export class ARTryOn {
         this.smoothedYaw = 0;
         this.smoothedPitch = 0;
         this.smoothedRoll = 0;
+        this._profileYawSign = null;
+        this._smoothedProfileBlend = 0;
     }
 
     _finishGarmentScene(gltf, loadedFrom, jsonResolved) {
@@ -2448,12 +2499,12 @@ export class ARTryOn {
         this.applyMaterialSettings();
         this.cacheSkeletonBones();
         this.garmentGroup = new THREE.Group();
+        this.garmentGroup.rotation.order = 'YXZ';
         this.garmentModel = gltf.scene;
         this.garmentGroup.add(this.garmentModel);
         this.scene.add(this.garmentGroup);
         this.garmentGroup.visible = true;
         this.measureGarmentFromBones();
-        this._applyGarmentCalibrationFromMetadata();
         this.applyMaterialSettings();
         if (this._isSam3LikeGarment()) {
             this._updateRigidGarmentFallback();
@@ -2489,6 +2540,13 @@ export class ARTryOn {
             this.showToast('No garment URL to load', 'error');
             return false;
         }
+        const loadKey = `${taskId || ''}|${glbResolved || ''}|${glbBase64 ? 'b64' : ''}`;
+        if (this._garmentLoadInFlight && this._garmentLoadKey === loadKey) {
+            return false;
+        }
+        this._garmentLoadInFlight = true;
+        this._garmentLoadKey = loadKey;
+        const loadToken = ++this._garmentLoadToken;
         try {
             this.showLoading('Loading garment…');
             this._resetGarmentSceneState();
@@ -2511,6 +2569,7 @@ export class ARTryOn {
                 ({ gltf, loadedFrom } = await this._loadGltfFromUrl(glbResolved));
             }
 
+            if (loadToken !== this._garmentLoadToken) return false;
             this._finishGarmentScene(gltf, loadedFrom, jsonResolved);
             this.showToast('Garment loaded — automatic body fit when your shoulders are visible', 'success');
             this.hideLoading();
@@ -2524,22 +2583,28 @@ export class ARTryOn {
             this.showToast('Load failed: ' + msg + hint, 'error');
             this.hideLoading();
             return false;
+        } finally {
+            if (loadToken === this._garmentLoadToken) {
+                this._garmentLoadInFlight = false;
+            }
         }
     }
 
     async _fetchGarmentMetadata(jsonUrl) {
-        this.garmentMetadata = null;
         if (!jsonUrl) return;
+        const token = ++this._metaFetchToken;
         try {
             const u = jsonUrl.startsWith('http') ? jsonUrl : this._absUrlMaybe(jsonUrl);
             if (!u) return;
             const r = await fetch(u, { cache: 'no-store', headers: this._tunnelFetchHeaders() });
             if (!r.ok) return;
-            this.garmentMetadata = await r.json();
+            const meta = await r.json();
+            if (token !== this._metaFetchToken) return;
+            this.garmentMetadata = meta;
             console.log('[garment.json] mediapipe_mapping keys:', Object.keys(this.garmentMetadata.mediapipe_mapping || {}).length);
             this._applyGarmentCalibrationFromMetadata();
         } catch (e) {
-            console.warn('garment.json fetch', e);
+            if (token === this._metaFetchToken) console.warn('garment.json fetch', e);
         }
     }
 
@@ -2972,12 +3037,19 @@ export class ARTryOn {
     }
 
     pollGenerationStatus(taskId) {
+        if (this._pollTaskId === taskId && this._pollIntervalId != null) {
+            return;
+        }
+        if (this._pollIntervalId != null) {
+            clearInterval(this._pollIntervalId);
+            this._pollIntervalId = null;
+        }
+        this._pollTaskId = taskId;
         const statusEl = document.getElementById('gen-status');
         const genBtn   = document.getElementById('gen-generate-btn');
         const retryBtn = document.getElementById('gen-retry-btn');
         let connErrors = 0;
         const MAX_CONN_ERRORS = 5;
-        let intervalId = null;
         let lastMetricKey: string | null = null;
         const tick = async () => {
             try {
@@ -3005,7 +3077,9 @@ export class ARTryOn {
                         this._lastGenLog = `${data.progress}|${data.message}|${es}`;
                     }
                 } else if (data.status === 'completed') {
-                    if (intervalId) clearInterval(intervalId);
+                    if (this._pollIntervalId) clearInterval(this._pollIntervalId);
+                    this._pollIntervalId = null;
+                    this._pollTaskId = null;
                     this._genWallStart = null;
                     const totalStr = this.formatGenElapsed(data.elapsed_sec);
                     genBtn.disabled = false;
@@ -3041,7 +3115,9 @@ export class ARTryOn {
                     }
                     this._generationInProgress = false;
                 } else if (data.status === 'failed') {
-                    if (intervalId) clearInterval(intervalId);
+                    if (this._pollIntervalId) clearInterval(this._pollIntervalId);
+                    this._pollIntervalId = null;
+                    this._pollTaskId = null;
                     this._genWallStart = null;
                     statusEl.className = 'gen-status fail';
                     const failTime = this.formatGenElapsed(data.elapsed_sec);
@@ -3059,7 +3135,9 @@ export class ARTryOn {
                     statusEl.textContent = `Server unreachable — retrying… (${connErrors}/${MAX_CONN_ERRORS})`;
                     return;
                 }
-                if (intervalId) clearInterval(intervalId);
+                if (this._pollIntervalId) clearInterval(this._pollIntervalId);
+                this._pollIntervalId = null;
+                this._pollTaskId = null;
                 this._genWallStart = null;
                 statusEl.className = 'gen-status fail';
                 statusEl.textContent = isNet ? 'Server stopped. Use ↺ Retry if done.' : 'Error: ' + e.message;
@@ -3069,12 +3147,14 @@ export class ARTryOn {
             }
         };
         void tick();
-        intervalId = setInterval(tick, 1000);
+        this._pollIntervalId = setInterval(tick, 1000);
     }
 
     // ─────────────────────────────────────────────────────────────────────
 
     setupUI() {
+        if (this._uiBound) return;
+        this._uiBound = true;
         const mobileControlsToggle = document.getElementById('mobile-controls-toggle');
         const mobileControlsClose = document.getElementById('mobile-controls-close');
         const syncMobileUi = () => {
@@ -3445,6 +3525,7 @@ export class ARTryOn {
 
         // Auto-apply immediately so there is no extra "Use" step.
         void (async () => {
+            if (this._garmentLoadInFlight) return;
             const statusEl = document.getElementById('generated-garment-status');
             if (statusEl) statusEl.textContent = 'Loading…';
             const ok = await this.loadGarmentFromUrl(glbUrl, jsonUrl || null, {
