@@ -1325,6 +1325,160 @@ def _crop_tile_cover_texture(path: Path, tw: int, th: int, thresh: int = 238) ->
     return _finalize_garment_tile(filled, fg_canvas)
 
 
+def _three_region_warp_to_tile(
+    arr: np.ndarray,
+    fg: np.ndarray,
+    tw: int,
+    th: int,
+    *,
+    shoulder_y_frac: float = 0.08,
+    hem_y_frac: float = 0.95,
+    side_margin_frac: float = 0.02,
+    sleeve_band_frac: float = 0.12,
+) -> Optional[Tuple[np.ndarray, np.ndarray]]:
+    """
+    Three-stage piecewise warp: the photo's TORSO, LEFT SLEEVE and RIGHT SLEEVE
+    regions are mapped to dedicated horizontal sub-columns of the tile so the
+    3D mesh's torso UV column samples ONLY torso content (chest prints stay on
+    the chest) and arm UV bands sample ONLY sleeve content. The torso/sleeve
+    boundaries are computed dynamically from the foreground mask:
+
+        - Shoulder row (top of garment)   → full shirt width (cuff..cuff).
+        - Mid-torso row (sleeves absent)  → torso-only width.
+
+    Tile layout (left-to-right):
+
+        [side_margin][LEFT sleeve band][TORSO band][RIGHT sleeve band][side_margin]
+
+    Seamlessness:
+        The same photo pixel at the shoulder-seam (torso_left / torso_right)
+        is sampled by both the outermost torso vert AND the innermost arm
+        vert, so the torso↔arm transition on the rendered mesh is seamless.
+
+    Returns ``(rgb, fg)`` at tile resolution, or ``None`` when the photo does
+    not have a clean three-region structure (caller falls back to legacy
+    cover/align logic).
+    """
+    if cv2 is None or not np.any(fg):
+        return None
+
+    lm = _body_landmarks_from_mask(fg)
+    if not lm:
+        return None
+    y_sh = int(lm["y_shoulder"])
+    y_hem = int(lm["y_hem"])
+    if y_hem - y_sh < 24:
+        return None
+
+    h_img, w_img = arr.shape[:2]
+
+    # Shoulder row: full shirt extent (cuff-to-cuff) including sleeves.
+    shoulder_xs = np.where(fg[y_sh])[0]
+    if shoulder_xs.size < 8:
+        return None
+    sx0 = int(shoulder_xs.min())
+    sx1 = int(shoulder_xs.max())
+    shoulder_w = sx1 - sx0
+
+    # Scan a band below the shoulder to find a row where the mask narrows to
+    # the torso-only width (short sleeves end). Use the NARROWEST row in the
+    # scan band as the chest reference; fall back to the median row.
+    scan_top = y_sh + max(8, int((y_hem - y_sh) * 0.30))
+    scan_bot = y_sh + int((y_hem - y_sh) * 0.65)
+    rows = []
+    for cy in range(scan_top, scan_bot + 1):
+        if cy < 0 or cy >= fg.shape[0]:
+            continue
+        cxs = np.where(fg[cy])[0]
+        if cxs.size >= 8:
+            rows.append((cy, int(cxs.min()), int(cxs.max())))
+    if not rows:
+        return None
+    # Pick the row with the smallest width (most likely torso-only).
+    chest_y, tx0, tx1 = min(rows, key=lambda r: r[2] - r[1])
+    torso_w = tx1 - tx0
+
+    # Sanity: torso must be narrower than the shoulder line, but not absurdly
+    # narrow (e.g. a fold accidentally splitting the mask). Bail out otherwise
+    # so the caller can fall back to centre-crop / cover.
+    if torso_w >= shoulder_w * 0.96 or torso_w < shoulder_w * 0.45:
+        return None
+
+    # Pad the torso bbox inward by a tiny amount so the boundary pixel is
+    # solidly inside the torso fabric, not on the shoulder-seam edge.
+    seam_pad = max(2, int(torso_w * 0.015))
+    tx0 = min(tx0 + seam_pad, (tx0 + tx1) // 2 - 8)
+    tx1 = max(tx1 - seam_pad, (tx0 + tx1) // 2 + 8)
+
+    # Tile-x breakpoints. Mirrors the mesh's UV column structure exactly.
+    target_x_pts = np.array(
+        [
+            side_margin_frac * tw,
+            (side_margin_frac + sleeve_band_frac) * tw,
+            (1.0 - side_margin_frac - sleeve_band_frac) * tw,
+            (1.0 - side_margin_frac) * tw,
+        ],
+        dtype=np.float32,
+    )
+    source_x_pts = np.array([sx0, tx0, tx1, sx1], dtype=np.float32)
+
+    # Vertical map: y_sh → tile shoulder_y_frac · th, y_hem → tile hem · th.
+    # Clamp to [y_sh, y_hem] so tile rows above the shoulder sample the photo's
+    # shoulder row (and below the hem sample the hem row). This keeps the
+    # warped mask continuous beyond the shirt's vertical extent — otherwise
+    # tile rows outside [target_y_sh, target_y_hem] punch holes in the atlas
+    # alpha at the mesh's collar / above-shoulder UV (alpha-clip → transparent
+    # → camera bleeds through).
+    target_y_sh = shoulder_y_frac * th
+    target_y_hem = hem_y_frac * th
+    y_scale = (y_hem - y_sh) / max(target_y_hem - target_y_sh, 1e-6)
+
+    tile_xs = np.arange(tw, dtype=np.float32)
+    tile_ys = np.arange(th, dtype=np.float32)
+
+    src_xs_for_tile = np.interp(tile_xs, target_x_pts, source_x_pts).astype(np.float32)
+    src_ys_raw = (tile_ys - target_y_sh) * y_scale + y_sh
+    src_ys_for_tile = np.clip(src_ys_raw, float(y_sh), float(y_hem)).astype(np.float32)
+
+    map_x = np.tile(src_xs_for_tile.reshape(1, -1), (th, 1))
+    map_y = np.tile(src_ys_for_tile.reshape(-1, 1), (1, tw))
+
+    warped_rgb = cv2.remap(
+        arr,
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_LANCZOS4,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    warped_fg_u8 = cv2.remap(
+        (fg.astype(np.uint8) * 255),
+        map_x,
+        map_y,
+        interpolation=cv2.INTER_NEAREST,
+        borderMode=cv2.BORDER_REPLICATE,
+    )
+    warped_fg = warped_fg_u8 >= 128
+
+    # Belt-and-braces: force opacity across the full tile width inside the
+    # vertical span actually used by the mesh UV (extrapolation rows already
+    # sample the shoulder/hem foreground row, but guard against any pinholes
+    # at the piecewise-warp x breakpoints).
+    span_top = int(np.clip(target_y_sh, 0, th - 1))
+    span_bot = int(np.clip(target_y_hem, 0, th - 1))
+    if span_bot > span_top:
+        warped_fg[:span_top, :] = warped_fg[span_top:span_top + 1, :]
+        warped_fg[span_bot + 1:, :] = warped_fg[span_bot:span_bot + 1, :]
+
+    print(
+        f"  [tile-3region] photo regions: "
+        f"shoulder x=[{sx0}..{sx1}] (w={shoulder_w}), "
+        f"torso x=[{tx0}..{tx1}] (w={torso_w}), chest_y={chest_y}, "
+        f"y=[{y_sh}..{y_hem}] → tile sleeve_band={sleeve_band_frac:.2f}",
+        flush=True,
+    )
+    return warped_rgb, warped_fg
+
+
 def _crop_tile_for_texture(path: Path, tw: int, th: int, thresh: int = 238) -> Tuple[np.ndarray, np.ndarray]:
     img = Image.open(path).convert("RGB")
     arr = np.asarray(img)
@@ -1333,6 +1487,41 @@ def _crop_tile_for_texture(path: Path, tw: int, th: int, thresh: int = 238) -> T
     if int(fg.sum()) < 500:
         rgb = np.array(img.resize((tw, th), Image.LANCZOS))
         return rgb, np.ones((th, tw), dtype=bool)
+
+    # PRIMARY: three-region (torso / left sleeve / right sleeve) placement.
+    # Keeps chest prints on torso geometry and gives a seamless torso↔arm
+    # transition. Set GARMENT_THREE_REGION_WARP=0 in .env to disable and fall
+    # through to the legacy full-bleed cover / shoulder-align modes below.
+    if (os.environ.get("GARMENT_THREE_REGION_WARP", "1") or "1").strip().lower() not in ("0", "false", "no", "off"):
+        try:
+            sleeve_band = float(
+                os.environ.get("GARMENT_SLEEVE_BAND_FRAC", "0.12") or "0.12"
+            )
+        except ValueError:
+            sleeve_band = 0.12
+        try:
+            sh_y = float(os.environ.get("GARMENT_TILE_SHOULDER_FRAC", "0.08") or "0.08")
+        except ValueError:
+            sh_y = 0.08
+        try:
+            hem_y = float(os.environ.get("GARMENT_TILE_HEM_FRAC", "0.95") or "0.95")
+        except ValueError:
+            hem_y = 0.95
+        three_region = _three_region_warp_to_tile(
+            arr, fg, tw, th,
+            shoulder_y_frac=sh_y,
+            hem_y_frac=hem_y,
+            sleeve_band_frac=sleeve_band,
+        )
+        if three_region is not None:
+            rgb_canvas, fg_canvas = three_region
+            print(
+                f"  [tile-3region] {path.name}: fg={int(fg_canvas.sum())}/{th * tw}",
+                flush=True,
+            )
+            filled = _stabilize_tile_background(rgb_canvas, fg_canvas) if np.any(fg_canvas) else rgb_canvas
+            return _finalize_garment_tile(filled, fg_canvas)
+        # Fall through to legacy logic on detection failure.
 
     if _use_texture_full_bleed():
         return _crop_tile_cover_texture(path, tw, th, thresh=thresh)
@@ -1930,27 +2119,58 @@ def _compute_garment_front_back_uv(
     ref_torso = Vd[is_torso]
     if ref_torso.shape[0] < 8:
         ref_torso = Vd
-    min_x = float(ref_torso[:, 0].min())
-    max_x = float(ref_torso[:, 0].max())
+
+    # ── Torso column geometry ─────────────────────────────────────────────
+    # Use the inner percentile band of torso verts so wide armpit / outer
+    # shoulder-cap verts don't stretch the column outward.
+    torso_min_x = float(np.percentile(ref_torso[:, 0], 7.0))
+    torso_max_x = float(np.percentile(ref_torso[:, 0], 93.0))
     min_y = float(ref_torso[:, 1].min())
     max_y = float(ref_torso[:, 1].max())
-    cx = float(ref_torso[:, 0].mean())
-    dx = max(max_x - min_x, 1e-6)
+    cx = float(np.median(ref_torso[:, 0]))
+    torso_dx = max(torso_max_x - torso_min_x, 1e-6)
     dy = max(max_y - min_y, 1e-6)
-    torso_half_w = max(dx * 0.5, 1e-6)
+    torso_half_w = max(torso_dx * 0.5, 1e-6)
+
+    # ── Three-region UV layout ─────────────────────────────────────────────
+    # Mirrors the photo-side 3-region warp in `_three_region_warp_to_tile`.
+    # The tile is split into three horizontal bands (per side):
+    #
+    #   [side_margin][LEFT sleeve][TORSO][RIGHT sleeve][side_margin]
+    #
+    # Torso verts sample ONLY the torso band; arm verts sample ONLY the
+    # sleeve bands. Boundary seamlessness: rightmost torso vert and
+    # innermost-right arm vert both sample u01 = torso_u_hi, which after the
+    # photo warp resolves to the same shoulder-seam pixel.
+    try:
+        sleeve_band = float(os.environ.get("GARMENT_SLEEVE_BAND_FRAC", "0.12") or "0.12")
+    except ValueError:
+        sleeve_band = 0.12
+    torso_u_lo = side_margin + sleeve_band
+    torso_u_hi = 1.0 - side_margin - sleeve_band
 
     u01 = np.zeros(Vd.shape[0], dtype=np.float64)
-    torso_u = np.clip((Vd[:, 0] - min_x) / dx, 0.0, 1.0)
-    torso_u = side_margin + torso_u * (1.0 - 2.0 * side_margin)
+    # Linear x→U inside the torso band. The photo has already been
+    # piecewise-warped so its torso content fills exactly this band, so a
+    # linear (no-sigmoid) sample preserves logo aspect ratio.
+    torso_t = np.clip((Vd[:, 0] - torso_min_x) / torso_dx, 0.0, 1.0)
+    torso_u = torso_u_lo + torso_t * (torso_u_hi - torso_u_lo)
     u01[is_torso] = torso_u[is_torso]
 
-    arm_front = is_arm & (front | side)
-    if np.any(arm_front):
+    # ── Arm UV: pushed INTO the outer sleeve bands ─────────────────────────
+    # Arm verts (front-, side- AND back-facing) sample only the
+    # [side_margin, torso_u_lo) and (torso_u_hi, 1 - side_margin] sub-columns.
+    if np.any(is_arm):
         rel = (Vd[:, 0] - cx) / torso_half_w
-        rel = np.clip(rel, -1.8, 1.8)
-        # Centre of front tile (u01=0.5) = chest; arms sample left/right sleeve areas.
-        u_arm = 0.5 + rel * 0.38
-        u01[arm_front] = np.clip(u_arm[arm_front], side_margin, 1.0 - side_margin)
+        # rel ≈ ±1 at the torso/arm seam (so the inner-arm vert overlaps with
+        # the outermost torso vert on the seam pixel — that's the seamless
+        # boundary). |rel| grows toward the cuff.
+        rel_clamped = np.clip(np.abs(rel), 1.0, 2.5)
+        sleeve_t = (rel_clamped - 1.0) / 1.5
+        left_u = torso_u_lo - sleeve_t * (torso_u_lo - side_margin)
+        right_u = torso_u_hi + sleeve_t * (1.0 - side_margin - torso_u_hi)
+        sleeve_u = np.where(rel < 0, left_u, right_u)
+        u01[is_arm] = np.clip(sleeve_u[is_arm], side_margin, 1.0 - side_margin)
 
     if _use_texture_full_bleed():
         v_coord = np.clip((Vd[:, 1] - min_y) / dy, 0.0, 1.0).astype(np.float64)

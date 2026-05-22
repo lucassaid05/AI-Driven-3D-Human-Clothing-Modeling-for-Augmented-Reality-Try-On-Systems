@@ -3459,6 +3459,7 @@ export class ARTryOn {
     _wireGeneratedGarmentCardUi() {
         const useBtn = document.getElementById('btn-use-generated-garment');
         const dismissBtn = document.getElementById('btn-dismiss-generated-garment');
+        const downloadBtn = document.getElementById('btn-download-generated-glb');
         useBtn?.addEventListener('click', async () => {
             if (!this._pendingGeneratedGlbUrl) return;
             const glb = this._pendingGeneratedGlbUrl;
@@ -3474,6 +3475,67 @@ export class ARTryOn {
             }
         });
         dismissBtn?.addEventListener('click', () => this._clearGeneratedGarmentPending());
+        downloadBtn?.addEventListener('click', () => { void this._downloadGeneratedGlb(); });
+    }
+
+    /**
+     * Fetch the pending generated GLB and trigger a browser save with a
+     * meaningful filename (garment_task_<id>.glb). Falls back to navigating
+     * directly to the GLB URL with the `download` attribute if fetch fails.
+     */
+    async _downloadGeneratedGlb() {
+        const url = this._pendingGeneratedGlbUrl;
+        if (!url) {
+            this.showToast('No generated GLB to download yet', 'error');
+            return;
+        }
+        const taskMatch = /\/generated\/(task_[A-Za-z0-9_-]+)\//.exec(url) || [];
+        const taskId = taskMatch[1] || 'garment';
+        const filename = `${taskId === 'garment' ? 'garment' : `garment_${taskId}`}.glb`;
+        const absUrl = this._absUrlMaybe(url) || url;
+        const downloadBtn = document.getElementById('btn-download-generated-glb');
+        const originalLabel = downloadBtn ? downloadBtn.textContent : '';
+        if (downloadBtn) {
+            (downloadBtn as HTMLButtonElement).disabled = true;
+            downloadBtn.textContent = 'Downloading…';
+        }
+        try {
+            const res = await fetch(absUrl, { cache: 'no-store' });
+            if (!res.ok) throw new Error(`HTTP ${res.status}`);
+            const blob = await res.blob();
+            const objUrl = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = objUrl;
+            a.download = filename;
+            a.style.display = 'none';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            setTimeout(() => URL.revokeObjectURL(objUrl), 30000);
+            this.showToast(`Saved ${filename}`, 'success');
+        } catch (e) {
+            console.error('GLB download failed:', e);
+            // Fallback: navigate via a temporary <a download> — works for
+            // same-origin and proxied URLs even without fetch().
+            try {
+                const a = document.createElement('a');
+                a.href = absUrl;
+                a.download = filename;
+                a.target = '_blank';
+                a.rel = 'noreferrer';
+                a.style.display = 'none';
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+            } catch (_) {
+                this.showToast('Download failed — try Open GLB and Save As', 'error');
+            }
+        } finally {
+            if (downloadBtn) {
+                (downloadBtn as HTMLButtonElement).disabled = false;
+                downloadBtn.textContent = originalLabel || 'Download GLB';
+            }
+        }
     }
 
     _absUrlMaybe(u) {
