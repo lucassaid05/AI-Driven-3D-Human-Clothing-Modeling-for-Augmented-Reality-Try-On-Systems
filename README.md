@@ -74,26 +74,42 @@ Mobile UX niceties baked in:
 
 ## Prerequisites
 
-- **Node.js** (for Vite / TypeScript try-on and builds).
-- **Python 3** with packages from [`requirements-pipeline.txt`](requirements-pipeline.txt), plus your Pix2Surf / PyTorch environment for `tshirt_to_glb_pose_ready.py`.
-- **Blender** on `PATH` or configured via `.env` (`BLENDER_BIN`) — used for export/skinning in the GLB script.
-- **Pix2Surf** checkout and **SMPL** model paths — the server defaults expect a layout relative to this repo (see **Configuration** below).
+You need four things on the machine before you run anything:
+
+1. **Node.js 18+ and npm** — for the Vite / TypeScript try-on app and builds. Download: <https://nodejs.org/>.
+2. **Python 3.10+** — used by `server-local.py` and the generation pipeline. The pinned packages live in [`requirements-pipeline.txt`](requirements-pipeline.txt):
+   - `numpy`, `Pillow`, `opencv-python-headless`, `rembg`, `mediapipe`.
+3. **PyTorch + Pix2Surf extras** — `tshirt_to_glb_pose_ready.py` additionally imports `torch`, `torchvision`, `trimesh`, and (for loading the SMPL pickle) `chumpy`. Install these into the same Python environment:
+   ```bash
+   # Pick the right command for your CUDA/CPU at https://pytorch.org/get-started/locally/
+   pip install torch torchvision
+   pip install trimesh chumpy
+   ```
+4. **Blender 3.x or newer** — used to skin and export the final GLB. Download from <https://www.blender.org/download/> and either make sure `blender` is on your `PATH` or point `BLENDER_BIN` in `.env` at the executable.
+
+You also need the two external assets the pipeline reads:
+
+- **Pix2Surf** repository checkout — set `PIX2SURF_ROOT` in `.env` to its path.
+- **SMPL** neutral model pickle (`basicModel_neutral_lbs_10_207_0_v1.0.0.pkl` or equivalent) — set `SMPL_PKL` in `.env` to its path.
+
+See **[Configuration](#configuration-env)** for the exact `.env` keys.
 
 ---
 
 ## Quick start
 
-### 1. Install and build the try-on
+### 1. Install the try-on front-end
 
 ```bash
 npm install
 npm run build
 ```
 
-### 2. Start the local server
+### 2. Install the Python pipeline and start the local server
 
 ```bash
 pip install -r requirements-pipeline.txt
+# Plus the extras from the Prerequisites section (PyTorch, trimesh, chumpy)
 python server-local.py
 ```
 
