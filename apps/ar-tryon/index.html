@@ -181,13 +181,25 @@
 
         <div class="panel-section">
           <h3>Body fit</h3>
-          <div class="info-box">
+          <div class="info-box" id="body-fit-info-auto">
             Shirt scale is <strong>automatic</strong>: each frame we estimate your shoulder span and torso length
             (MediaPipe), match them to the garment’s bind-space shoulders and hem height, and blend by view angle—same
             logic as the old calibrate step, but smoothed over time. Side view temporarily holds the last good scale so
             width does not jitter.
           </div>
-          <div class="slider-group slider-row--mt">
+          <div class="info-box hidden" id="body-fit-info-manual">
+            Shirt scale is <strong>manual</strong>: drag the slider below to size the garment yourself. Auto-fit,
+            side-view hold, and the trim / shoulder-squeeze controls are bypassed until you switch back to Auto.
+            Position and rotation still follow your pose.
+          </div>
+          <div class="slider-row slider-row--mt">
+            <label>Scale mode</label>
+            <select id="scale-mode-select" class="tryon-select tryon-select--sm">
+              <option value="auto" selected>Auto (default)</option>
+              <option value="manual">Manual</option>
+            </select>
+          </div>
+          <div class="slider-group slider-row--mt" id="auto-scale-controls">
             <div class="slider-row">
               <label>Auto size trim</label>
               <input type="range" id="auto-scale-trim-slider" min="0.70" max="1.05" step="0.01" value="0.92" />
@@ -197,6 +209,13 @@
               <label>Shoulder squeeze (X)</label>
               <input type="range" id="shoulder-squeeze-slider" min="0.75" max="1.05" step="0.01" value="0.94" />
               <span id="shoulder-squeeze-value">0.94</span>
+            </div>
+          </div>
+          <div class="slider-group slider-row--mt hidden" id="manual-scale-controls">
+            <div class="slider-row">
+              <label>Manual scale</label>
+              <input type="range" id="manual-scale-slider" min="0.30" max="2.50" step="0.01" value="1.00" />
+              <span id="manual-scale-value">1.00</span>
             </div>
           </div>
         </div>

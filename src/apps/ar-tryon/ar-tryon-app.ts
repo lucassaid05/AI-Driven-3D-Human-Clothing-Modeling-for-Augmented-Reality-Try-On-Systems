@@ -128,6 +128,14 @@ export class ARTryOn {
              * slightly narrower than the visible mesh at the sleeves.
              */
             autoShoulderSqueezeX: 0.94,
+            /**
+             * 'auto' (default): structural fit + trim + squeeze drive garmentGroup.scale every frame.
+             * 'manual': the manualScale slider directly sets a uniform scale; auto-fit, side-view hold,
+             * trim, and shoulder squeeze are bypassed. Pose-based position & rotation still apply.
+             */
+            scaleMode: 'auto',
+            /** Uniform scale used when scaleMode === 'manual'. */
+            manualScale: 1.0,
             frontFaceOnly: true,
             /**
              * Pix2Surf / many SMPL shirt GLBs show the back texture when Three.js uses FrontSide toward the camera.
@@ -593,6 +601,14 @@ export class ARTryOn {
     /** When pose metrics fail (shoulders not visible to MP yet), still show a centered rigid shirt at a sane scale. */
     _updateRigidGarmentFallback() {
         if (!this.garmentGroup || !this.garmentModel) return;
+        if (this.settings.scaleMode === 'manual') {
+            const m = THREE.MathUtils.clamp(Number(this.settings.manualScale) || 1, 0.05, 5);
+            this.garmentGroup.scale.setScalar(m);
+            this.garmentGroup.position.set(0, 0, 0);
+            this.garmentGroup.rotation.set(0, 0, 0);
+            this.smoothedScale = m;
+            return;
+        }
         const box = new THREE.Box3().setFromObject(this.garmentModel);
         const size = box.getSize(new THREE.Vector3());
         const maxDim = Math.max(size.x, size.y, size.z, 1e-6);
@@ -2097,7 +2113,15 @@ export class ARTryOn {
         const squeezeX = THREE.MathUtils.clamp(Number(this.settings.autoShoulderSqueezeX) || 1, 0.75, 1.05);
         const boost = THREE.MathUtils.clamp(AR_TRYON_COVERAGE_BOOST, 1.0, 1.12);
         const applied = u * trim * boost;
-        this.garmentGroup.scale.set(applied * squeezeX, applied, applied);
+        if (this.settings.scaleMode === 'manual') {
+            // Manual: bypass auto-fit / smoothing / side-view hold. Slider drives a uniform scale directly.
+            const m = THREE.MathUtils.clamp(Number(this.settings.manualScale) || 1, 0.05, 5);
+            this.garmentGroup.scale.set(m, m, m);
+            this.smoothedScale = m;
+            this.debugInfo.clampedScale = m;
+        } else {
+            this.garmentGroup.scale.set(applied * squeezeX, applied, applied);
+        }
 
         // ========================================
         // ROTATION - YAW, PITCH, and ROLL
@@ -3209,8 +3233,18 @@ export class ARTryOn {
         this.setupSlider('rotation-y-slider', 'rotation-y-value', v => this.settings.rotationY = v, v => v + '°');
         this.setupSlider('smoothing-slider', 'smoothing-value', v => this.settings.smoothingFactor = v);
         this.setupSlider('auto-scale-trim-slider', 'auto-scale-trim-value', v => this.settings.autoScaleTrim = v);
+        this.setupSlider('manual-scale-slider', 'manual-scale-value', v => this.settings.manualScale = v);
 
-        
+        const scaleModeSel = document.getElementById('scale-mode-select');
+        if (scaleModeSel) {
+            scaleModeSel.value = this.settings.scaleMode === 'manual' ? 'manual' : 'auto';
+            this._applyScaleModeUi(this.settings.scaleMode);
+            scaleModeSel.addEventListener('change', () => {
+                const mode = (scaleModeSel as HTMLSelectElement).value === 'manual' ? 'manual' : 'auto';
+                this._setScaleMode(mode);
+            });
+        }
+
         const poseIntervalSel = document.getElementById('pose-detect-interval');
         if (poseIntervalSel) {
             const syncPoseEvery = () => {
@@ -3618,6 +3652,42 @@ export class ARTryOn {
         if (h && b) this._scheduleAutoGenerate();
     }
 
+    /**
+     * Switch between 'auto' and 'manual' scale modes. Resets smoothed-scale state so the
+     * other mode starts fresh on the next frame instead of dragging the previous value
+     * through the lerp.
+     */
+    _setScaleMode(mode) {
+        const next = mode === 'manual' ? 'manual' : 'auto';
+        if (next === this.settings.scaleMode) {
+            this._applyScaleModeUi(next);
+            return;
+        }
+        this.settings.scaleMode = next;
+        // Reset smoothing so neither mode inherits the other's last scale.
+        this.fitStructuralMul = null;
+        this.smoothedScale = null;
+        this._lastFrontScale = null;
+        this._applyScaleModeUi(next);
+    }
+
+    /** Toggle visibility of the auto vs manual sub-panels + info boxes. */
+    _applyScaleModeUi(mode) {
+        const isManual = mode === 'manual';
+        const autoCtrls = document.getElementById('auto-scale-controls');
+        const manualCtrls = document.getElementById('manual-scale-controls');
+        const infoAuto = document.getElementById('body-fit-info-auto');
+        const infoManual = document.getElementById('body-fit-info-manual');
+        autoCtrls?.classList.toggle('hidden', isManual);
+        manualCtrls?.classList.toggle('hidden', !isManual);
+        infoAuto?.classList.toggle('hidden', isManual);
+        infoManual?.classList.toggle('hidden', !isManual);
+        const sel = document.getElementById('scale-mode-select');
+        if (sel && (sel as HTMLSelectElement).value !== mode) {
+            (sel as HTMLSelectElement).value = mode;
+        }
+    }
+
     setupSlider(sliderId, valueId, cb, fmt = v => v.toFixed(2)) {
         const s = document.getElementById(sliderId);
         const v = document.getElementById(valueId);
@@ -3647,7 +3717,8 @@ export class ARTryOn {
             'smoothing-slider': 0.4,
             'shoulder-drop-slider': 0.075,
             'auto-scale-trim-slider': 0.92,
-            'shoulder-squeeze-slider': 0.94
+            'shoulder-squeeze-slider': 0.94,
+            'manual-scale-slider': 1.0
         };
         
         for (const [id, val] of Object.entries(defaults)) {
@@ -3655,6 +3726,8 @@ export class ARTryOn {
             if (el) { el.value = val; el.dispatchEvent(new Event('input')); }
         }
         
+        this._setScaleMode('auto');
+
         this.fitStructuralMul = null;
         this.smoothedScale = null;
         this.smoothedPosition.set(0, 0, 0);
